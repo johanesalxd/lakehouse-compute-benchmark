@@ -1,4 +1,4 @@
-# Lakehouse Compute Benchmark — Architecture & Swarm Execution Contract (`SPEC.md`)
+# Lakehouse Compute Benchmark — Architecture & Benchmark Contract (`SPEC.md`)
 
 > **Purpose:** Single source of truth governing data ingestion, Medallion transformation parity, fairness guardrails, telemetry schema, and zero-collision file ownership across all benchmark variants. Every notebook and helper script **MUST** conform strictly to this specification so results across engines are 100% apples-to-apples.
 
