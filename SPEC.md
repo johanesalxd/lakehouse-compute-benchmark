@@ -1,4 +1,4 @@
-# Lakehouse Compute Benchmark — Architecture & Swarm Execution Contract (`SPEC.md`)
+# Lakehouse Compute Benchmark — Architecture & Benchmark Contract (`SPEC.md`)
 
 > **Purpose:** Single source of truth governing data ingestion, Medallion transformation parity, fairness guardrails, telemetry schema, and zero-collision file ownership across all benchmark variants. Every notebook and helper script **MUST** conform strictly to this specification so results across engines are 100% apples-to-apples.
 
@@ -13,16 +13,18 @@
    - All Spark reads and Medallion writes (`Bronze -> Silver -> Gold`) execute purely against **open Parquet files in Cloud Storage (`gs://${BENCH_BUCKET}/...`)** using the Spark DataFrame / Spark SQL API so in-cluster JVM vs. Lightning Engine + Gluten/Velox C++ (`NQE`) compute is measured honestly.
 3. **x86 Hardware Parity on Dataproc GCE (`Image 2.3-debian12`):**
    - Both `CLUSTER_STD_NAME` (`--engine=default`) and `CLUSTER_LGT_NAME` (`--engine=lightning`) use identical **x86** GCE VM shapes (`MASTER_MACHINE_TYPE`, `WORKER_MACHINE_TYPE`, `NUM_PRIMARY_WORKERS`, `NUM_WORKER_LOCAL_SSDS` NVMe Local SSDs; zero ARM VMs).
-4. **BigQuery `BigFrames 2.x` (`03`) Grounding & Slot Cap:**
+4. **BigQuery `BigFrames 2.x` (`03`) Grounding, Optimization Contrasts & Slot Cap:**
    - Use official **`bigframes.pandas as bpd`** (`bigframes >= 2.40`; **do NOT import non-existent `bigframes.spark`**).
    - Explicitly set **`bpd.options.bigquery.ordering_mode = "partial"`** at session initialization so `BigFrames` uses distributed unordered SQL pushdown rather than hashing every row for strict sequential pandas indexing.
-   - Run `03` against **both** storage backends to separate **Compute Engine** speed from **Storage Engine** compression:
-     - **Variant `bigframes_biglake_gcs`:** Queries `DS_BRONZE_BIGLAKE` external BigLake Parquet tables pointing at the **exact same GCS Parquet files** read by Spark!
-     - **Variant `bigframes_native_bq`:** Queries `DS_BRONZE_NATIVE` (`storage_billing_model = 'PHYSICAL'` Capacitor tables, partitioned/clustered).
-   - Demonstrate BigQuery slot governance live: verify `SET @@reservation = 'NONE'` is rejected (`HTTP 400`) when assigned to `BQ_RESERVATION_NAME` without override permissions, and capture exact `total_slot_ms`, `total_bytes_processed`, and `bi_engine_statistics` from `` `region-us`.INFORMATION_SCHEMA.JOBS_BY_PROJECT ``.
+   - Run `03` across **four BigQuery execution passes** (`BF_PASS_FILTER="all"` default, or comma-separated subset from `biglake,native,ctas_native,lazy_e2e`) separating **Storage Engine**, **Write/Clustering Optimization**, and **Pipeline Fusion**:
+     - **Pass 4 — `bigframes_biglake_gcs`:** Queries `DS_BRONZE_BIGLAKE` external BigLake Parquet tables pointing at the **exact same GCS Parquet files** read by Spark (`to_gbq` into `DS_SILVER_BQ` for downstream stages).
+     - **Pass 5 — `bigframes_native_bq`:** Queries `DS_BRONZE_NATIVE` (`storage_billing_model = 'PHYSICAL'` Capacitor tables) using naive `df.to_gbq(..., if_exists="replace")` per stage (baseline demonstrating staged `_SESSION.bqdf_*` + `MERGE INTO` double-writes and unclustered Silver intermediates).
+     - **Pass 6 — `bigframes_ctas_native_bq`:** Materializes identical 4-stage Silver & Gold checkpoints via single-pass `df.sql` **`CREATE OR REPLACE TABLE ... CLUSTER BY ...`** (`sold_date_sk, customer_sk, item_sk` on Silver; `d_date_sk, channel, i_category` on Gold) and omits Stage 3 `daily.cache()`, eliminating `_SESSION + MERGE` overhead as a within-BigQuery ELT optimization while keeping 100% 4-stage checkpoint symmetry with Spark.
+     - **Pass 7 — `bigframes_lazy_e2e_bq` (`stage_id = "stage_e2e_bronze_to_gold"`):** Chains Stage 1 -> Stage 2A -> Stage 3 lazily in ONE `BigFrames` expression over `DS_BRONZE_NATIVE` and materializes Gold in a single Clustered CTAS with zero intermediate Silver disk writes — categorized explicitly as **Pipeline Fusion (no Silver materialization)** for Gold parity, slot-second savings, and TCO contrast rather than 1:1 checkpoint-equivalent engine speed.
+   - Demonstrate BigQuery slot governance live: verify `SET @@reservation = 'NONE'` is rejected (`HTTP 400`) when assigned to `BQ_RESERVATION_NAME` without override permissions (`ALLOW_UNRESERVED_BQ=true` overrides if unreserved), and capture exact `total_slot_ms`, `total_bytes_processed`, and `bi_engine_statistics` from `` `region-us`.INFORMATION_SCHEMA.JOBS_BY_PROJECT ``.
 5. **Scale-Preset Portability (`small_1g` First -> Zero-Code Scale-Up to `100g` / `500g`):**
    - All data sits in **`US` multi-region** (`BQ_LOCATION="US"`, `GCS_LOCATION="US"`) paired with Dataproc GCE in **`us-central1`** (`$0.00` intra-US GCS egress).
-   - Changing `SCALE_PRESET` in `.env` requires re-running `00_data_copy_ingestion.ipynb` only; notebooks `01`–`04` require **zero code edits**.
+   - Reference multi-scale hardware progression: **`small_1g`** (`16` Spark worker vCPUs / `2` NVMe SSDs vs. `100` BQ slots) -> **`medium_100g`** (`64` Spark worker vCPUs / `8` NVMe SSDs vs. `200` BQ slots) -> **`large_500g`** (`64` Spark worker vCPUs / `8` NVMe SSDs vs. `400` BQ slots); `00` supports optional `INGEST_MODE="native_only"` for fast `DS_BRONZE_NATIVE` backfills. Changing `SCALE_PRESET` in `.env` requires re-running `00` only; notebooks `01`–`04` require **zero code edits**.
 
 ---
 
@@ -58,9 +60,9 @@ All 8 required tables are openly readable (`allUsers`) in `bigquery-public-data.
 
 ---
 
-## 3. Identical 3-Stage Medallion Specification (`01`, `02`, `03`)
+## 3. Identical Medallion Specification (`01`, `02`, `03`)
 
-Every compute notebook (`01` Standard Spark, `02` Lightning Base + Lightning NQE, `03` BigFrames over BigLake GCS + Native BQ) **MUST** execute and time these exact 3 stages (plus optional Stage `2B` Python UDF contrast):
+Every staged compute pass (`01` Standard Spark, `02` Lightning Base + Lightning NQE, `03` BigFrames `bigframes_biglake_gcs`, `bigframes_native_bq`, and `bigframes_ctas_native_bq`) **MUST** execute and time these exact 3 stages (plus optional Stage `2B` Python UDF / SQL pushdown contrast), while `bigframes_lazy_e2e_bq` chains Stages `1 -> 2A -> 3` lazily into `stage_e2e_bronze_to_gold` as a **Pipeline Fusion (no Silver materialization)** pass:
 
 ### Stage 1: `stage1_bronze_to_silver` (Omnichannel Sales & Returns Reconciliation)
 1. **Filter clean sales lines:** Keep rows where `sold_date_sk IS NOT NULL`, `item_sk IS NOT NULL`, `customer_sk IS NOT NULL`, and `quantity > 0` (`ws_bill_customer_sk` & `ws_bill_cdemo_sk` for web).
@@ -69,7 +71,7 @@ Every compute notebook (`01` Standard Spark, `02` Lightning Base + Lightning NQE
    - `web_returns_agg`: group by `(wr_item_sk, wr_order_number)` -> `SUM(COALESCE(wr_return_quantity, 0)) AS return_qty`, `SUM(COALESCE(wr_return_amt, 0.0)) AS return_amt`, `SUM(COALESCE(wr_net_loss, 0.0)) AS return_net_loss`.
 3. **Left-join & Union (`store` + `web`)** into materialized Silver table / Parquet dataset `silver_omnichannel_sales` with exact columns:
    - `channel` (`'STORE'` or `'WEB'`), `sold_date_sk` (`INT64`), `item_sk` (`INT64`), `customer_sk` (`INT64`), `cdemo_sk` (`INT64`), `order_number` (`INT64`), `quantity` (`INT64`), `gross_sales_price` (`FLOAT64`, from `COALESCE(ext_sales_price, 0.0)`), `discount_amt` (`FLOAT64`, from `COALESCE(ext_discount_amt, 0.0)`), `net_paid` (`FLOAT64`, from `COALESCE(ss_net_paid/ws_net_paid, 0.0)`), `net_profit` (`FLOAT64`, from `COALESCE(ss_net_profit/ws_net_profit, 0.0)`), `return_qty` (`INT64`, default `0`), `return_amt` (`FLOAT64`, default `0.0`), `net_paid_after_return` (`FLOAT64` = `net_paid - COALESCE(return_amt, 0.0)`), `net_profit_after_return` (`FLOAT64` = `net_profit - COALESCE(return_net_loss, 0.0)`).
-4. **Materialize** `silver_omnichannel_sales` (`mode="overwrite"` Parquet on GCS for Spark; `to_gbq(..., if_exists="replace")` in `DS_SILVER_BQ` for `BigFrames`) so Stage 1 write I/O is captured cleanly and downstream stages read materialized Silver.
+4. **Materialize** `silver_omnichannel_sales` (`mode="overwrite"` Parquet on GCS for Spark; `to_gbq(..., if_exists="replace")` in `DS_SILVER_BQ` for baseline `BigFrames`; single-pass `CREATE OR REPLACE TABLE ... CLUSTER BY sold_date_sk, customer_sk, item_sk` for `bigframes_ctas_native_bq`) so Stage 1 write I/O is captured cleanly and downstream stages read materialized Silver. (Omitted in `bigframes_lazy_e2e_bq`.)
 
 ### Stage 2A (`stage2a_silver_vectorized`) & Stage 2B (`stage2b_silver_udf`): Tiering & Risk Scoring
 Computes `order_risk_tier` (`STRING`) and `adjusted_margin_score` (`FLOAT64`) over `silver_omnichannel_sales` (on `medium_100g`/`large_500g`, Stage `2B` filters deterministically to `MOD(order_number, 20) = 0` or `UDF_MAX_SAMPLE_ROWS` and logs `sample_fraction` so UDF overhead is quantified without multi-hour runs; on `small_1g`, run on `100%` of Silver rows or deterministic `500K` cap):
@@ -104,7 +106,7 @@ Computes `order_risk_tier` (`STRING`) and `adjusted_margin_score` (`FLOAT64`) ov
    - `rolling_30d_net_paid`: `SUM(daily_net_paid)` over `ROWS BETWEEN 29 PRECEDING AND CURRENT ROW`
    - `rolling_30d_return_rate`: `SAFE_DIVIDE(SUM(daily_return_amt) OVER 29d, NULLIF(SUM(daily_gross_sales) OVER 29d, 0))`
    - `category_daily_share`: `daily_net_paid / NULLIF(SUM(daily_net_paid) OVER (PARTITION BY d_date_sk, channel), 0)`
-4. **Materialize** `gold_omnichannel_kpi_mart` and record validation checksums: `COUNT(*)` and `ROUND(SUM(daily_net_paid), 2)`. Across all engines (`01`, `02`, `03`), **`COUNT(*)` MUST match 100% and `SUM(daily_net_paid)` MUST match within `±0.01%` floating-point tolerance!**
+4. **Materialize** `gold_omnichannel_kpi_mart` (or `gold_omnichannel_kpi_mart_lazy_e2e` via **`stage_e2e_bronze_to_gold`** in `bigframes_lazy_e2e_bq`, which executes Steps `Stage 1 -> Stage 2A -> Stage 3` in one Clustered CTAS without intermediate Silver disk writes) and record validation checksums: `COUNT(*)` and `ROUND(SUM(daily_net_paid), 2)`. Across all **7 variants** (`01`, `02`, `03`), Final Gold KPI Mart **`COUNT(*)` MUST match 100% and `SUM(daily_net_paid)` MUST match within `±0.01%` floating-point tolerance!**
 
 ---
 
@@ -117,9 +119,9 @@ Computes `order_risk_tier` (`STRING`) and `adjusted_margin_score` (`FLOAT64`) ov
   "run_id": "20261116T080000Z_small_1g",
   "timestamp_utc": "2026-11-16T08:00:12Z",
   "scale_preset": "small_1g",
-  "engine_variant": "spark_standard | spark_lightning_base | spark_lightning_nqe | bigframes_biglake_gcs | bigframes_native_bq",
+  "engine_variant": "spark_standard | spark_lightning_base | spark_lightning_nqe | bigframes_biglake_gcs | bigframes_native_bq | bigframes_ctas_native_bq | bigframes_lazy_e2e_bq",
   "storage_backend": "gcs_parquet | biglake_gcs_parquet | bq_native_capacitor",
-  "stage_id": "stage1_bronze_to_silver | stage2a_silver_vectorized | stage2b_silver_udf | stage3_silver_to_gold",
+  "stage_id": "stage1_bronze_to_silver | stage2a_silver_vectorized | stage2b_silver_udf | stage3_silver_to_gold | stage_e2e_bronze_to_gold",
   "start_epoch_sec": 1794816000.12,
   "end_epoch_sec": 1794816018.45,
   "wall_clock_sec": 18.33,
@@ -133,15 +135,16 @@ Computes `order_risk_tier` (`STRING`) and `adjusted_margin_score` (`FLOAT64`) ov
   "bq_bytes_processed": null,
   "nqe_enabled": false,
   "nqe_fallback_note": "",
-  "est_list_cost_usd": 0.0812
+  "est_list_cost_usd": 0.0812,
+  "sample_fraction": 1.0
 }
 ```
 
 ### Cost Calculation Formulas in `04_benchmark_summary_and_tco.ipynb` (Parameterized US List Rates)
 Keep all rates parameterized at the top of `04_benchmark_summary_and_tco.ipynb` so users can plug in any region or CUD discount (`1-Yr` / `3-Yr` / `Spot`):
-- **Dataproc GCE Standard (`us-central1` default list parameters):** `(VM $/vCPU-hr + $0.010 Dataproc fee + Local SSD $/hr) × cluster_hours` (plus parameterized toggle comparing **On-Demand** vs. **`15%` Primary 1-Yr CUD + `85%` Spot EFM**!).
+- **Dataproc GCE Standard (`us-central1` default list parameters):** `(VM $/vCPU-hr + $0.010 Dataproc fee + Local SSD $/hr) × cluster_hours` (automatically inferring per-scale worker & NVMe SSD count: `2` SSDs on `2 x n2d-standard-8`, `8` SSDs on `4 x n2d-standard-16`; plus parameterized toggle comparing **On-Demand** vs. **`15%` Primary 1-Yr CUD + `85%` Spot EFM**!).
 - **Dataproc GCE Lightning Engine:** Adds **`+$0.0025 / vCPU-hr`** Lightning Engine surcharge on top of Standard, calculating the empirical **break-even speedup `%`** (`~5–10%` on On-Demand VMs, `~36%` on heavy Spot blends) vs. actual measured speedup!
-- **BigQuery Enterprise Edition (`US` multi-region):** Models both **(a) Dedicated Slot-Hour Allocation** (`slot_seconds_used / 3600 × $0.06/slot-hr` list or `$0.048` 1-Yr / `$0.036` 3-Yr CUD, showing idle-slot sharing advantage when idle capacity returns immediately in `0s`) and **(b) Reservation Ceiling Wall-Clock Cost** (`BQ_SLOT_CAP × wall_clock_hours × slot_rate`), plus empirical **`1 BigQuery Slot ≈ X Spark vCPUs`** equivalency ratio per stage!
+- **BigQuery Enterprise Edition (`US` multi-region):** Models both **(a) Shared / Consumed Slot-Hour Allocation** (`slot_seconds_used / 3,600 × $0.06/slot-hr` list or `$0.048` 1-Yr / `$0.036` 3-Yr CUD, reflecting immediate idle-slot return in `0s`) and **(b) Standalone Reservation Ceiling Cost** (`BQ_SLOT_CAP × wall_clock_hours × slot_rate`, e.g., `100` / `200` / `400` slots). Empirical **`1 BigQuery Slot ≈ X Spark vCPUs`** equivalency ratios are anchored on 1:1 Silver-materializing passes (`bigframes_biglake_gcs` Stage 1 and staged Native BQ `to_gbq` / `CTAS`), while **`bigframes_lazy_e2e_bq`** (`stage_e2e_bronze_to_gold`) is labeled explicitly as **Pipeline Fusion (no Silver writes)** alongside exact `%` slot-second and TCO reductions!
 
 ---
 
