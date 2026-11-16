@@ -145,13 +145,12 @@ Keep all rates parameterized at the top of `04_benchmark_summary_and_tco.ipynb` 
 
 ---
 
-## 5. Swarm File-Ownership Boundaries (Zero File Collisions)
+## 5. Component & Module Ownership
 
-| Worker Roster Name | Model | Workspace | Owned Files (Exclusive Write Scope) |
-| :--- | :--- | :--- | :--- |
-| **`infra-ingest`** | `gemini-flash-next` | `share` | `README.md`, `scripts/provision_infra.sh`, `scripts/teardown_infra.sh`, `scripts/metrics_helper.py`, `notebooks/00_data_copy_ingestion.ipynb` |
-| **`spark-standard`** | `gemini-flash-next` | `share` | `notebooks/01_medallion_spark_standard.ipynb`, `scripts/submit_spark_medallion.py` *(shared CLI runner parameterized by `--engine-variant` if helpful, or standalone notebook)* |
-| **`spark-lightning`** | `gemini-flash-next` | `share` | `notebooks/02_medallion_spark_lightning.ipynb` *(runs both Base Lightning `runtime=default` and Gluten/Velox C++ NQE `runtime=native`, plus Spark plan inspection)* |
-| **`bigframes`** | `gemini-flash-next` | `share` | `notebooks/03_medallion_bigquery_bigframes.ipynb` *(runs `bigframes.pandas` with `ordering_mode="partial"` on both `DS_BRONZE_BIGLAKE` and `DS_BRONZE_NATIVE` + reservation override guardrail check)* |
-| **`summary-report`** | `gemini-flash-next` | `share` | `notebooks/04_benchmark_summary_and_tco.ipynb`, `scripts/generate_sample_telemetry.py`, `results/sample_benchmark_runs.jsonl` |
-| **`verifier`** | *(Coordinator default: `Carbon`)* | `inherit` | Read-only audit across branches/merged tree (`SPEC.md` schema/SQL parity, notebook JSON structure, Python syntax, `bash -n`, zero-leak PCRE scan, and sequential `small_1g` execution readiness). Never edits author files directly; posts findings to `@<author>` or `@coordinator`. |
+| Component | Role | Owned Files |
+| :--- | :--- | :--- |
+| **Infrastructure & Bronze Ingestion** | GCP provisioning, teardown, shared 21-field telemetry helper, and Bronze TPC-DS dual-backend copy | `README.md`, `scripts/provision_infra.sh`, `scripts/teardown_infra.sh`, `scripts/metrics_helper.py`, `notebooks/00_data_copy_ingestion.ipynb` |
+| **Dataproc Spark Standard** | Shared pure-GCS PySpark Medallion runner and Standard Spark (`--engine=default`) notebook | `notebooks/01_medallion_spark_standard.ipynb`, `scripts/run_spark_medallion.py` |
+| **Dataproc Spark Lightning** | Lightning Base (`runtime=default`) and Gluten/Velox C++ NQE (`runtime=native`) execution + plan inspection | `notebooks/02_medallion_spark_lightning.ipynb` |
+| **BigQuery DataFrames (`BigFrames`)** | `bigframes.pandas` (`ordering_mode="partial"`) over `DS_BRONZE_BIGLAKE` & `DS_BRONZE_NATIVE` + slot reservation governance | `notebooks/03_medallion_bigquery_bigframes.ipynb` |
+| **Executive Summary & TCO** | Deterministic dry-run sample telemetry, parity audit, latency charts, and parameterized TCO model | `notebooks/04_benchmark_summary_and_tco.ipynb`, `scripts/generate_sample_telemetry.py`, `results/sample_benchmark_runs.jsonl` |
