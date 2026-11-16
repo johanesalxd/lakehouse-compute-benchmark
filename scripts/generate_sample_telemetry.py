@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Deterministic generator and validator for offline 3-scale benchmark telemetry.
+"""Deterministic generator and validator for offline 3-scale, 7-variant benchmark telemetry.
 
-Generates a realistic 60-record multi-scale dataset across ``small_1g``,
-``medium_100g``, and ``large_500g`` (3 scales x 5 engine variants x 4 stages)
-matching the exact 21-field schema in ``SPEC.md`` §4 (including
-``sample_fraction=0.05`` on Stage 2B for ``medium_100g`` and ``large_500g``)
-and writes it to ``results/sample_benchmark_runs.jsonl``.
+Generates a realistic 75-record multi-scale dataset across ``small_1g``,
+``medium_100g``, and ``large_500g`` (3 scales x [6 staged variants x 4 stages +
+1 lazy end-to-end variant x 1 E2E stage = 25 rows/scale]) matching the exact
+21-field schema in ``SPEC.md`` §4 (including ``sample_fraction=0.05`` on Stage 2B
+for ``medium_100g`` and ``large_500g``) and writes it to
+``results/sample_benchmark_runs.jsonl``.
 """
 
 from __future__ import annotations
@@ -53,11 +54,16 @@ SCALE_ORDER: tuple[str, ...] = (
     "large_500g",
 )
 
-STAGE_ORDER: tuple[str, ...] = (
+STAGED_STAGE_ORDER: tuple[str, ...] = (
     "stage1_bronze_to_silver",
     "stage2a_silver_vectorized",
     "stage2b_silver_udf",
     "stage3_silver_to_gold",
+)
+
+STAGE_ORDER: tuple[str, ...] = (
+    *STAGED_STAGE_ORDER,
+    "stage_e2e_bronze_to_gold",
 )
 
 ENGINE_SPECS: dict[str, dict[str, Any]] = {
@@ -65,26 +71,43 @@ ENGINE_SPECS: dict[str, dict[str, Any]] = {
         "storage_backend": "gcs_parquet",
         "is_spark": True,
         "nqe_enabled": False,
+        "stages": STAGED_STAGE_ORDER,
     },
     "spark_lightning_base": {
         "storage_backend": "gcs_parquet",
         "is_spark": True,
         "nqe_enabled": False,
+        "stages": STAGED_STAGE_ORDER,
     },
     "spark_lightning_nqe": {
         "storage_backend": "gcs_parquet",
         "is_spark": True,
         "nqe_enabled": True,
+        "stages": STAGED_STAGE_ORDER,
     },
     "bigframes_biglake_gcs": {
         "storage_backend": "biglake_gcs_parquet",
         "is_spark": False,
         "nqe_enabled": False,
+        "stages": STAGED_STAGE_ORDER,
     },
     "bigframes_native_bq": {
         "storage_backend": "bq_native_capacitor",
         "is_spark": False,
         "nqe_enabled": False,
+        "stages": STAGED_STAGE_ORDER,
+    },
+    "bigframes_ctas_native_bq": {
+        "storage_backend": "bq_native_capacitor",
+        "is_spark": False,
+        "nqe_enabled": False,
+        "stages": STAGED_STAGE_ORDER,
+    },
+    "bigframes_lazy_e2e_bq": {
+        "storage_backend": "bq_native_capacitor",
+        "is_spark": False,
+        "nqe_enabled": False,
+        "stages": ("stage_e2e_bronze_to_gold",),
     },
 }
 
@@ -132,6 +155,11 @@ SCALE_PROFILES: dict[str, dict[str, Any]] = {
                 "sample_fraction": 1.0,
             },
             "stage3_silver_to_gold": {
+                "output_row_count": 424_486,
+                "base_checksum_net_paid": 5_839_057_120.80,
+                "sample_fraction": 1.0,
+            },
+            "stage_e2e_bronze_to_gold": {
                 "output_row_count": 424_486,
                 "base_checksum_net_paid": 5_839_057_120.80,
                 "sample_fraction": 1.0,
@@ -203,6 +231,35 @@ SCALE_PROFILES: dict[str, dict[str, Any]] = {
                     "bytes_processed": 284_100_600,
                 },
             },
+            "bigframes_ctas_native_bq": {
+                "stage1_bronze_to_silver": {
+                    "wall_sec": 8.90,
+                    "slot_ms": 48_000,
+                    "bytes_processed": 248_900_400,
+                },
+                "stage2a_silver_vectorized": {
+                    "wall_sec": 5.40,
+                    "slot_ms": 19_000,
+                    "bytes_processed": 196_400_200,
+                },
+                "stage2b_silver_udf": {
+                    "wall_sec": 7.60,
+                    "slot_ms": 34_000,
+                    "bytes_processed": 172_800_000,
+                },
+                "stage3_silver_to_gold": {
+                    "wall_sec": 10.20,
+                    "slot_ms": 62_000,
+                    "bytes_processed": 261_400_000,
+                },
+            },
+            "bigframes_lazy_e2e_bq": {
+                "stage_e2e_bronze_to_gold": {
+                    "wall_sec": 12.40,
+                    "slot_ms": 94_000,
+                    "bytes_processed": 284_100_600,
+                },
+            },
         },
     },
     "medium_100g": {
@@ -231,6 +288,11 @@ SCALE_PROFILES: dict[str, dict[str, Any]] = {
                 "sample_fraction": 0.05,
             },
             "stage3_silver_to_gold": {
+                "output_row_count": 16_420_800,
+                "base_checksum_net_paid": 267_910_240_120.00,
+                "sample_fraction": 1.0,
+            },
+            "stage_e2e_bronze_to_gold": {
                 "output_row_count": 16_420_800,
                 "base_checksum_net_paid": 267_910_240_120.00,
                 "sample_fraction": 1.0,
@@ -302,6 +364,35 @@ SCALE_PROFILES: dict[str, dict[str, Any]] = {
                     "bytes_processed": 27_100_000_000,
                 },
             },
+            "bigframes_ctas_native_bq": {
+                "stage1_bronze_to_silver": {
+                    "wall_sec": 29.50,
+                    "slot_ms": 1_850_000,
+                    "bytes_processed": 23_900_000_000,
+                },
+                "stage2a_silver_vectorized": {
+                    "wall_sec": 12.40,
+                    "slot_ms": 680_000,
+                    "bytes_processed": 18_400_000_000,
+                },
+                "stage2b_silver_udf": {
+                    "wall_sec": 10.80,
+                    "slot_ms": 540_000,
+                    "bytes_processed": 16_200_000_000,
+                },
+                "stage3_silver_to_gold": {
+                    "wall_sec": 32.50,
+                    "slot_ms": 2_350_000,
+                    "bytes_processed": 24_800_000_000,
+                },
+            },
+            "bigframes_lazy_e2e_bq": {
+                "stage_e2e_bronze_to_gold": {
+                    "wall_sec": 46.00,
+                    "slot_ms": 3_350_000,
+                    "bytes_processed": 24_600_000_000,
+                },
+            },
         },
     },
     "large_500g": {
@@ -311,7 +402,7 @@ SCALE_PROFILES: dict[str, dict[str, Any]] = {
             "vcpus_per_worker": 16,
             "total_worker_vcpus": 64,
             "ssds_per_worker": 2,
-            "bq_slot_cap": 200,
+            "bq_slot_cap": 400,
         },
         "stage_parity": {
             "stage1_bronze_to_silver": {
@@ -330,7 +421,12 @@ SCALE_PROFILES: dict[str, dict[str, Any]] = {
                 "sample_fraction": 0.05,
             },
             "stage3_silver_to_gold": {
-                "output_row_count": 78_640_500,
+                "output_row_count": 82_104_000,
+                "base_checksum_net_paid": 1_339_551_200_600.00,
+                "sample_fraction": 1.0,
+            },
+            "stage_e2e_bronze_to_gold": {
+                "output_row_count": 82_104_000,
                 "base_checksum_net_paid": 1_339_551_200_600.00,
                 "sample_fraction": 1.0,
             },
@@ -359,46 +455,75 @@ SCALE_PROFILES: dict[str, dict[str, Any]] = {
             },
             "bigframes_biglake_gcs": {
                 "stage1_bronze_to_silver": {
-                    "wall_sec": 358.00,
+                    "wall_sec": 198.00,
                     "slot_ms": 30_500_000,
                     "bytes_processed": 209_250_000_000,
                 },
                 "stage2a_silver_vectorized": {
-                    "wall_sec": 114.00,
+                    "wall_sec": 66.00,
                     "slot_ms": 8_800_000,
                     "bytes_processed": 147_000_000_000,
                 },
                 "stage2b_silver_udf": {
-                    "wall_sec": 84.00,
+                    "wall_sec": 49.00,
                     "slot_ms": 6_400_000,
                     "bytes_processed": 147_000_000_000,
                 },
                 "stage3_silver_to_gold": {
-                    "wall_sec": 422.00,
+                    "wall_sec": 236.00,
                     "slot_ms": 38_200_000,
                     "bytes_processed": 231_000_000_000,
                 },
             },
             "bigframes_native_bq": {
                 "stage1_bronze_to_silver": {
-                    "wall_sec": 218.00,
+                    "wall_sec": 128.00,
                     "slot_ms": 17_800_000,
                     "bytes_processed": 119_500_000_000,
                 },
                 "stage2a_silver_vectorized": {
-                    "wall_sec": 78.00,
+                    "wall_sec": 48.00,
                     "slot_ms": 6_200_000,
                     "bytes_processed": 92_000_000_000,
                 },
                 "stage2b_silver_udf": {
-                    "wall_sec": 62.00,
+                    "wall_sec": 39.00,
                     "slot_ms": 4_400_000,
                     "bytes_processed": 92_000_000_000,
                 },
                 "stage3_silver_to_gold": {
-                    "wall_sec": 264.00,
+                    "wall_sec": 156.00,
                     "slot_ms": 24_400_000,
                     "bytes_processed": 135_500_000_000,
+                },
+            },
+            "bigframes_ctas_native_bq": {
+                "stage1_bronze_to_silver": {
+                    "wall_sec": 62.00,
+                    "slot_ms": 8_900_000,
+                    "bytes_processed": 119_500_000_000,
+                },
+                "stage2a_silver_vectorized": {
+                    "wall_sec": 23.00,
+                    "slot_ms": 3_100_000,
+                    "bytes_processed": 92_000_000_000,
+                },
+                "stage2b_silver_udf": {
+                    "wall_sec": 20.00,
+                    "slot_ms": 2_400_000,
+                    "bytes_processed": 79_500_000_000,
+                },
+                "stage3_silver_to_gold": {
+                    "wall_sec": 71.00,
+                    "slot_ms": 10_800_000,
+                    "bytes_processed": 118_000_000_000,
+                },
+            },
+            "bigframes_lazy_e2e_bq": {
+                "stage_e2e_bronze_to_gold": {
+                    "wall_sec": 98.00,
+                    "slot_ms": 15_400_000,
+                    "bytes_processed": 122_000_000_000,
                 },
             },
         },
@@ -431,7 +556,7 @@ def generate_sample_records(
     seed: int = 42,
     run_id_prefix: str = RUN_ID_PREFIX_DEFAULT,
 ) -> list[dict[str, Any]]:
-    """Build deterministic 60-record 3-scale telemetry (small_1g, medium_100g, large_500g)."""
+    """Build deterministic 75-record 3-scale, 7-variant telemetry (small_1g, medium_100g, large_500g)."""
     rng = random.Random(seed)
     records: list[dict[str, Any]] = []
 
@@ -450,7 +575,7 @@ def generate_sample_records(
             is_spark = bool(spec["is_spark"])
             engine_gap = 180.0 if scale_preset == "small_1g" else 600.0
 
-            for stage_id in STAGE_ORDER:
+            for stage_id in spec["stages"]:
                 profile = stage_profiles[engine_variant][stage_id]
                 parity = stage_parity[stage_id]
 
@@ -525,15 +650,23 @@ def generate_sample_records(
     return records
 
 
+def _parity_group_for_stage(stage_id: str) -> str:
+    if stage_id in ("stage3_silver_to_gold", "stage_e2e_bronze_to_gold"):
+        return "gold_kpi_mart"
+    return stage_id
+
+
 def validate_records(records: list[dict[str, Any]]) -> None:
-    """Validate schema, per-scale hardware/sample invariants, and cross-engine parity."""
-    expected_count = len(SCALE_ORDER) * len(ENGINE_SPECS) * len(STAGE_ORDER)
+    """Validate schema, per-scale hardware/sample invariants, and 7-variant Gold/stage parity."""
+    per_scale_expected = sum(len(spec["stages"]) for spec in ENGINE_SPECS.values())
+    expected_count = len(SCALE_ORDER) * per_scale_expected
     if len(records) != expected_count:
         raise ValueError(f"Expected {expected_count} records across {len(SCALE_ORDER)} scales, got {len(records)}")
 
     seen_triples: set[tuple[str, str, str]] = set()
-    by_scale_stage: dict[tuple[str, str], list[dict[str, Any]]] = {
-        (scale, stage): [] for scale in SCALE_ORDER for stage in STAGE_ORDER
+    parity_groups = ("stage1_bronze_to_silver", "stage2a_silver_vectorized", "stage2b_silver_udf", "gold_kpi_mart")
+    by_scale_group: dict[tuple[str, str], list[dict[str, Any]]] = {
+        (scale, grp): [] for scale in SCALE_ORDER for grp in parity_groups
     }
 
     for idx, rec in enumerate(records):
@@ -549,8 +682,8 @@ def validate_records(records: list[dict[str, Any]]) -> None:
             raise ValueError(f"Record {idx} unknown scale_preset: {scale}")
         if engine not in ENGINE_SPECS:
             raise ValueError(f"Record {idx} unknown engine_variant: {engine}")
-        if stage not in STAGE_ORDER:
-            raise ValueError(f"Record {idx} unknown stage_id: {stage}")
+        if stage not in ENGINE_SPECS[engine]["stages"]:
+            raise ValueError(f"Record {idx} invalid stage_id {stage} for engine {engine}")
         if (scale, engine, stage) in seen_triples:
             raise ValueError(f"Duplicate (scale_preset, engine_variant, stage_id): {(scale, engine, stage)}")
         seen_triples.add((scale, engine, stage))
@@ -595,22 +728,23 @@ def validate_records(records: list[dict[str, Any]]) -> None:
         elif rec["nqe_enabled"]:
             raise ValueError(f"Record {idx} nqe_enabled must be False for {engine}")
 
-        by_scale_stage[(scale, stage)].append(rec)
+        by_scale_group[(scale, _parity_group_for_stage(stage))].append(rec)
 
-    # Cross-engine row-count 100% parity & checksum within +/- 0.0001% within each (scale, stage)
-    for (scale, stage), stage_rows in by_scale_stage.items():
-        if len(stage_rows) != len(ENGINE_SPECS):
-            raise ValueError(f"{scale}/{stage} expected {len(ENGINE_SPECS)} engine rows, got {len(stage_rows)}")
-        row_counts = {r["output_row_count"] for r in stage_rows}
+    # Cross-engine row-count 100% parity & checksum within +/- 0.0001% within each (scale, group)
+    for (scale, grp), group_rows in by_scale_group.items():
+        expected_engines = 7 if grp == "gold_kpi_mart" else 6
+        if len(group_rows) != expected_engines:
+            raise ValueError(f"{scale}/{grp} expected {expected_engines} engine rows, got {len(group_rows)}")
+        row_counts = {r["output_row_count"] for r in group_rows}
         if len(row_counts) != 1:
-            raise ValueError(f"{scale}/{stage} row count parity failed: {row_counts}")
+            raise ValueError(f"{scale}/{grp} row count parity failed: {row_counts}")
 
-        ref_checksum = stage_rows[0]["checksum_net_paid"]
-        for r in stage_rows:
+        ref_checksum = group_rows[0]["checksum_net_paid"]
+        for r in group_rows:
             delta_pct = abs(r["checksum_net_paid"] - ref_checksum) / ref_checksum * 100.0
             if delta_pct > 0.0001:
                 raise ValueError(
-                    f"{scale}/{stage} checksum drift {delta_pct:.6f}% exceeds +/-0.0001% for {r['engine_variant']}"
+                    f"{scale}/{grp} checksum drift {delta_pct:.6f}% exceeds +/-0.0001% for {r['engine_variant']}"
                 )
 
 
@@ -629,7 +763,7 @@ def load_jsonl(input_path: Path) -> list[dict[str, Any]]:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Generate and validate 3-scale sample benchmark telemetry JSONL.")
+    parser = argparse.ArgumentParser(description="Generate and validate 3-scale, 7-variant sample benchmark telemetry JSONL.")
     parser.add_argument("--seed", type=int, default=42, help="Deterministic PRNG seed (default: 42)")
     parser.add_argument(
         "--run-id",
