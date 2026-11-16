@@ -600,6 +600,10 @@ def run_pipeline(
             lightning_runtime=lightning_runtime,
             sample_fraction=sample_fraction,
         )
+        silver_rows = int(r1["output_row_count"])
+        sampled_rows = int(r2b["output_row_count"])
+        if silver_rows > 0 and sampled_rows > 0:
+            r2b["sample_fraction"] = min(1.0, round(sampled_rows / silver_rows, 6))
         records.append(r2b)
         plans["stage2b_silver_udf"] = p2b
     else:
