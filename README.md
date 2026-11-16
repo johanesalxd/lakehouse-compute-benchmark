@@ -25,6 +25,16 @@ Every design choice in this repository isolates **Compute Engine throughput** fr
 4. **Intra-US Zero-Egress Topology:** BigQuery datasets (`US`), GCS bucket (`US`), and Dataproc GCE clusters (`us-central1`) stay intra-US for `$0.00` GCS data-transfer egress.
 5. **Zero-Code Scale Portability:** Switch `SCALE_PRESET` in `.env` (`small_1g` -> `medium_100g` -> `large_500g`) and re-run `00_data_copy_ingestion.ipynb` only; notebooks `01`–`04` execute unchanged.
 
+### Measurement Boundary & Storage Scope Nuances
+
+- **Timer Boundaries (`wall_clock_sec`):**
+  - **Dataproc Spark (`01` & `02`):** `scripts/run_spark_medallion.py` executes a `spark.range(1).count()` warm-up first and starts/stops each stage's `wall_clock_sec` timer **in-cluster** around DataFrame construction and `.write.mode("overwrite").parquet(...)`. This excludes `gcloud dataproc jobs submit` CLI startup, YARN application initialization, and executor ramp-up (tracked separately via client-side `submit_wall_clock_sec`).
+  - **BigQuery DataFrames (`03`):** Each stage's `wall_clock_sec` timer runs **client-side** around `BigFrames` expression compilation and `to_gbq(..., if_exists="replace")` execution, so it includes API submission, SQL query compilation, and job polling round-trips. On sub-second `small_1g` stages, fixed client/API round-trip latency is significant relative to actual compute; on `medium_100g` and `large_500g`, compute dominates.
+- **Stage 1 vs. Stages 2A, 2B, and 3 Storage Scope:**
+  - **Stage 1 (`stage1_bronze_to_silver`)** is the strict Bronze storage-parity test: Dataproc Spark (`01`, `02`) and `bigframes_biglake_gcs` (`03` Pass 1) scan the exact same Snappy Parquet objects in `gs://${BENCH_BUCKET}/bronze/`, while `bigframes_native_bq` (`03` Pass 2) reads the identical data stored in clustered BigQuery Native Capacitor tables (`storage_billing_model='PHYSICAL'`).
+  - **Stages 2A, 2B, and 3** write and read intermediate Silver tables inside each engine's native storage layer: Spark reads/writes Silver Parquet on GCS, whereas **both** `BigFrames` passes (`bigframes_biglake_gcs` and `bigframes_native_bq`) materialize intermediate Silver tables (`silver_omnichannel_sales_*`, `silver_enriched_sales_*`) in native BigQuery `DS_SILVER_BQ` (`PHYSICAL` storage). In Stage 3, `bigframes_biglake_gcs` still reads the 4 Bronze dimension tables from `DS_BRONZE_BIGLAKE` (GCS Parquet), while `bigframes_native_bq` reads them from `DS_BRONZE_NATIVE`.
+- **Provisioned vCPU-Seconds vs. Consumed Slot-Seconds:** Spark `vcpu_seconds` measures provisioned worker capacity (`total_worker_vcpus * wall_clock_sec`, including intra-stage skew/idle cores), whereas BigQuery `bq_total_slot_ms` measures actual Dremel slot-milliseconds consumed.
+
 ---
 
 ## Architecture Overview
