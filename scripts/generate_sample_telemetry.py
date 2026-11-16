@@ -240,20 +240,20 @@ SCALE_PROFILES: dict[str, dict[str, Any]] = {
             "spark_standard": {
                 "stage1_bronze_to_silver": {"wall_sec": 168.00},
                 "stage2a_silver_vectorized": {"wall_sec": 74.00},
-                "stage2b_silver_udf": {"wall_sec": 52.00},
+                "stage2b_silver_udf": {"wall_sec": 48.00},
                 "stage3_silver_to_gold": {"wall_sec": 196.00},
             },
             "spark_lightning_base": {
                 "stage1_bronze_to_silver": {"wall_sec": 146.00},
                 "stage2a_silver_vectorized": {"wall_sec": 64.00},
-                "stage2b_silver_udf": {"wall_sec": 49.50},
+                "stage2b_silver_udf": {"wall_sec": 44.00},
                 "stage3_silver_to_gold": {"wall_sec": 168.00},
             },
             "spark_lightning_nqe": {
                 "stage1_bronze_to_silver": {"wall_sec": 78.00},
                 "stage2a_silver_vectorized": {"wall_sec": 28.50},
                 "stage2b_silver_udf": {
-                    "wall_sec": 56.40,
+                    "wall_sec": 54.00,
                     "nqe_fallback_note": NQE_FALLBACK_NOTE_UDF,
                 },
                 "stage3_silver_to_gold": {"wall_sec": 88.50},
@@ -339,20 +339,20 @@ SCALE_PROFILES: dict[str, dict[str, Any]] = {
             "spark_standard": {
                 "stage1_bronze_to_silver": {"wall_sec": 845.00},
                 "stage2a_silver_vectorized": {"wall_sec": 365.00},
-                "stage2b_silver_udf": {"wall_sec": 248.00},
+                "stage2b_silver_udf": {"wall_sec": 195.00},
                 "stage3_silver_to_gold": {"wall_sec": 1060.00},
             },
             "spark_lightning_base": {
                 "stage1_bronze_to_silver": {"wall_sec": 725.00},
                 "stage2a_silver_vectorized": {"wall_sec": 312.00},
-                "stage2b_silver_udf": {"wall_sec": 236.00},
+                "stage2b_silver_udf": {"wall_sec": 178.00},
                 "stage3_silver_to_gold": {"wall_sec": 895.00},
             },
             "spark_lightning_nqe": {
                 "stage1_bronze_to_silver": {"wall_sec": 372.00},
                 "stage2a_silver_vectorized": {"wall_sec": 132.00},
                 "stage2b_silver_udf": {
-                    "wall_sec": 268.00,
+                    "wall_sec": 214.00,
                     "nqe_fallback_note": NQE_FALLBACK_NOTE_UDF,
                 },
                 "stage3_silver_to_gold": {"wall_sec": 442.00},
