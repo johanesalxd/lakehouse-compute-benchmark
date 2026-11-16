@@ -15,15 +15,24 @@ from pathlib import Path
 import re
 from typing import Any
 
-VALID_ENGINE_VARIANTS: frozenset[str] = frozenset(
+SPARK_ENGINE_VARIANTS: frozenset[str] = frozenset(
     {
         "spark_standard",
         "spark_lightning_base",
         "spark_lightning_nqe",
-        "bigframes_biglake_gcs",
-        "bigframes_native_bq",
     }
 )
+
+BIGQUERY_ENGINE_VARIANTS: frozenset[str] = frozenset(
+    {
+        "bigframes_biglake_gcs",
+        "bigframes_native_bq",
+        "bigframes_ctas_native_bq",
+        "bigframes_lazy_e2e_bq",
+    }
+)
+
+VALID_ENGINE_VARIANTS: frozenset[str] = SPARK_ENGINE_VARIANTS | BIGQUERY_ENGINE_VARIANTS
 
 VALID_STORAGE_BACKENDS: frozenset[str] = frozenset(
     {
@@ -39,6 +48,7 @@ VALID_STAGE_IDS: frozenset[str] = frozenset(
         "stage2a_silver_vectorized",
         "stage2b_silver_udf",
         "stage3_silver_to_gold",
+        "stage_e2e_bronze_to_gold",
     }
 )
 
@@ -311,7 +321,7 @@ def estimate_stage_list_cost_usd(
     Edition slot-hours (falling back to ``bq_slot_cap * wall_clock_hours`` if
     ``bq_total_slot_ms`` is unavailable).
     """
-    if engine_variant in ("spark_standard", "spark_lightning_base", "spark_lightning_nqe"):
+    if engine_variant in SPARK_ENGINE_VARIANTS:
         if total_worker_vcpus is None:
             return None
         family = _extract_machine_family(worker_machine_type)
@@ -347,14 +357,19 @@ def estimate_stage_list_cost_usd(
         total_rate_per_vcpu_hr = vcpu_hr_rate + ram_hr_rate + dp_fee + lightning_fee + ssd_per_vcpu_hr
         return round(worker_vcpu_hours * total_rate_per_vcpu_hr, 6)
 
-    slot_rate = float(US_LIST_RATES["bq_enterprise_slot_hr_usd"])
-    if bq_total_slot_ms is not None:
-        slot_hours = (float(bq_total_slot_ms) / 1000.0) / 3600.0
-        return round(slot_hours * slot_rate, 6)
-    if bq_slot_cap is not None:
-        ceiling_hours = (float(bq_slot_cap) * float(wall_clock_sec)) / 3600.0
-        return round(ceiling_hours * slot_rate, 6)
-    return None
+    if engine_variant in BIGQUERY_ENGINE_VARIANTS:
+        slot_rate = float(US_LIST_RATES["bq_enterprise_slot_hr_usd"])
+        if bq_total_slot_ms is not None:
+            slot_hours = (float(bq_total_slot_ms) / 1000.0) / 3600.0
+            return round(slot_hours * slot_rate, 6)
+        if bq_slot_cap is not None:
+            ceiling_hours = (float(bq_slot_cap) * float(wall_clock_sec)) / 3600.0
+            return round(ceiling_hours * slot_rate, 6)
+        return None
+
+    raise ValueError(
+        f"Invalid engine_variant={engine_variant!r}; expected one of {sorted(VALID_ENGINE_VARIANTS)}"
+    )
 
 
 def _validate_finite(name: str, value: float) -> float:
