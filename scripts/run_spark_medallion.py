@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import json
+import re
 import sys
 import time
 from typing import Any
@@ -148,8 +149,69 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
-def capture_formatted_plan(df: DataFrame, spark: SparkSession) -> str:
-    """Return Catalyst formatted physical execution plan string."""
+def _list_sql_execution_ids(spark: SparkSession) -> set[int]:
+    """Return Spark SQL AppStatusStore execution IDs currently recorded on driver."""
+    try:
+        store = spark._jsparkSession.sharedState().statusStore()
+        seq = store.executionsList()
+        return {int(seq.apply(i).executionId()) for i in range(seq.size())}
+    except Exception:  # noqa: BLE001
+        return set()
+
+
+def _trim_aqe_initial_plan(plan_text: str) -> str:
+    """Strip unexecuted AQE Initial Plan tree lines when a Final Plan is present."""
+    if "+- == Final Plan ==" not in plan_text or "+- == Initial Plan ==" not in plan_text:
+        return plan_text
+    out_lines: list[str] = []
+    skip_initial = False
+    in_details = False
+    for line in plan_text.splitlines():
+        stripped = line.strip()
+        if not in_details and re.match(r"^\(\d+\)\s+", stripped):
+            in_details = True
+            skip_initial = False
+        if not in_details:
+            if stripped.startswith("+- == Initial Plan =="):
+                skip_initial = True
+                continue
+            if skip_initial:
+                if not stripped:
+                    skip_initial = False
+                else:
+                    continue
+        out_lines.append(line)
+    return "\n".join(out_lines)
+
+
+def capture_formatted_plan(
+    df: DataFrame,
+    spark: SparkSession,
+    prior_exec_ids: set[int] | None = None,
+) -> str:
+    """Return the executed physical plan when available, falling back to df explain."""
+    if prior_exec_ids is not None:
+        try:
+            spark.sparkContext._jsc.sc().listenerBus().waitUntilEmpty(5000)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            store = spark._jsparkSession.sharedState().statusStore()
+            seq = store.executionsList()
+            candidates: list[tuple[int, str]] = []
+            for i in range(seq.size()):
+                ex = seq.apply(i)
+                eid = int(ex.executionId())
+                if eid not in prior_exec_ids:
+                    phys = str(ex.physicalPlanDescription() or "")
+                    if phys.strip():
+                        candidates.append((eid, phys))
+            if candidates:
+                candidates.sort(key=lambda item: item[0])
+                return _trim_aqe_initial_plan(candidates[-1][1])
+        except Exception:  # noqa: BLE001
+            pass
+
     try:
         explain_mode = spark._jvm.org.apache.spark.sql.execution.ExplainMode.fromString(
             "formatted"
@@ -385,12 +447,13 @@ def _execute_timed_stage(
     sample_fraction: float = 1.0,
 ) -> tuple[dict[str, Any], str]:
     """Execute one timed Medallion stage, capture plan, and validate output Parquet."""
+    prior_exec_ids = _list_sql_execution_ids(spark)
     start_epoch_sec = time.time()
     df = df_builder()
     df.write.mode("overwrite").parquet(out_path)
     end_epoch_sec = time.time()
 
-    plan_text = capture_formatted_plan(df, spark)
+    plan_text = capture_formatted_plan(df, spark, prior_exec_ids=prior_exec_ids)
     output_row_count, checksum_net_paid = _measure_output_checksum(
         spark, out_path, checksum_col
     )
