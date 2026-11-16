@@ -319,13 +319,11 @@ else
     exit 1
   fi
 
-  echo "==> [5/6] Configuring BigQuery Enterprise reservation ${BQ_RESERVATION_NAME} (baseline=${BQ_BASELINE_SLOTS}, max_slots=${BQ_SLOT_CAP})..."
+  AUTOSCALE_SLOTS=$(( BQ_SLOT_CAP - BQ_BASELINE_SLOTS ))
+
+  echo "==> [5/6] Configuring BigQuery Enterprise reservation ${BQ_RESERVATION_NAME} (baseline=${BQ_BASELINE_SLOTS}, autoscale=${AUTOSCALE_SLOTS}, max_slots=${BQ_SLOT_CAP})..."
   if existing_res_json="$(bq show --reservation --project_id="${BQ_ADMIN_PROJECT_ID}" --location="${BQ_LOCATION}" --format=json "${BQ_RESERVATION_NAME}" 2>/dev/null)"; then
-    desired_autoscale=0
-    if [[ "${BQ_BASELINE_SLOTS}" -lt "${BQ_SLOT_CAP}" ]]; then
-      desired_autoscale="${BQ_SLOT_CAP}"
-    fi
-    res_needs_update="$(python3 - "${existing_res_json}" "${BQ_BASELINE_SLOTS}" "${desired_autoscale}" <<'PY'
+    res_needs_update="$(python3 - "${existing_res_json}" "${BQ_BASELINE_SLOTS}" "${AUTOSCALE_SLOTS}" <<'PY'
 import json
 import sys
 
@@ -341,12 +339,12 @@ print("1" if (cur_base != int(want_base) or cur_auto != int(want_auto)) else "0"
 PY
 )"
     if [[ "${res_needs_update}" == "1" ]]; then
-      echo "    Updating reservation ${BQ_ADMIN_PROJECT_ID}:${BQ_LOCATION}.${BQ_RESERVATION_NAME} to baseline=${BQ_BASELINE_SLOTS}, autoscale_max_slots=${desired_autoscale}..."
+      echo "    Updating reservation ${BQ_ADMIN_PROJECT_ID}:${BQ_LOCATION}.${BQ_RESERVATION_NAME} to baseline=${BQ_BASELINE_SLOTS}, autoscale_max_slots=${AUTOSCALE_SLOTS}..."
       bq update --reservation \
         --project_id="${BQ_ADMIN_PROJECT_ID}" \
         --location="${BQ_LOCATION}" \
         --slots="${BQ_BASELINE_SLOTS}" \
-        --autoscale_max_slots="${desired_autoscale}" \
+        --autoscale_max_slots="${AUTOSCALE_SLOTS}" \
         "${BQ_RESERVATION_NAME}"
     else
       echo "    Reservation ${BQ_ADMIN_PROJECT_ID}:${BQ_LOCATION}.${BQ_RESERVATION_NAME} already matches desired capacity."
@@ -359,8 +357,8 @@ PY
       --edition=ENTERPRISE
       --slots="${BQ_BASELINE_SLOTS}"
     )
-    if [[ "${BQ_BASELINE_SLOTS}" -lt "${BQ_SLOT_CAP}" ]]; then
-      mk_res_cmd+=(--autoscale_max_slots="${BQ_SLOT_CAP}")
+    if [[ "${AUTOSCALE_SLOTS}" -gt 0 ]]; then
+      mk_res_cmd+=(--autoscale_max_slots="${AUTOSCALE_SLOTS}")
     fi
     mk_res_cmd+=("${BQ_RESERVATION_NAME}")
     if ! "${mk_res_cmd[@]}"; then
