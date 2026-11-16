@@ -221,8 +221,32 @@ else
   echo "    No matching QUERY reservation assignment found for ${BQ_RESERVATION_NAME}; skipping."
 fi
 
-# 3. Delete BigQuery Enterprise reservation
-if bq show --reservation --project_id="${BQ_ADMIN_PROJECT_ID}" --location="${BQ_LOCATION}" --format=json "${BQ_RESERVATION_NAME}" >/dev/null 2>&1; then
+# 3. Scale down baseline/autoscale slots to 0 (if non-zero) and delete BigQuery Enterprise reservation
+if res_json="$(bq show --reservation --project_id="${BQ_ADMIN_PROJECT_ID}" --location="${BQ_LOCATION}" --format=json "${BQ_RESERVATION_NAME}" 2>/dev/null)"; then
+  need_zero="$(python3 - "${res_json}" <<'PY'
+import json
+import sys
+
+raw = sys.argv[1]
+idx = raw.find("{")
+if idx == -1:
+    print("0")
+    sys.exit(0)
+obj = json.loads(raw[idx:])
+baseline = int(obj.get("slotCapacity") or 0)
+autoscale_max = int(((obj.get("autoscale") or {}).get("maxSlots")) or 0)
+print("1" if (baseline > 0 or autoscale_max > 0) else "0")
+PY
+)"
+  if [[ "${need_zero}" == "1" ]]; then
+    echo "==> Scaling BigQuery reservation '${BQ_RESERVATION_NAME}' to 0 baseline / 0 autoscale slots before deletion..."
+    bq update --reservation \
+      --project_id="${BQ_ADMIN_PROJECT_ID}" \
+      --location="${BQ_LOCATION}" \
+      --slots=0 \
+      --autoscale_max_slots=0 \
+      "${BQ_RESERVATION_NAME}"
+  fi
   echo "==> Deleting BigQuery reservation '${BQ_ADMIN_PROJECT_ID}:${BQ_LOCATION}.${BQ_RESERVATION_NAME}'..."
   bq rm --reservation \
     --project_id="${BQ_ADMIN_PROJECT_ID}" \

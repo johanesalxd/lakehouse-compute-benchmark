@@ -92,6 +92,7 @@ WORKER_MACHINE_TYPE="${WORKER_MACHINE_TYPE:-n2d-standard-8}"
 NUM_PRIMARY_WORKERS="${NUM_PRIMARY_WORKERS:-2}"
 NUM_WORKER_LOCAL_SSDS="${NUM_WORKER_LOCAL_SSDS:-1}"
 BQ_RESERVATION_NAME="${BQ_RESERVATION_NAME:-bench-elt-slots}"
+BQ_BASELINE_SLOTS="${BQ_BASELINE_SLOTS:-0}"
 BQ_SLOT_CAP="${BQ_SLOT_CAP:-100}"
 BIGLAKE_CONNECTION_ID="${BIGLAKE_CONNECTION_ID:-bench-biglake-us}"
 DS_BRONZE_NATIVE="${DS_BRONZE_NATIVE:-bench_bronze_native}"
@@ -309,17 +310,60 @@ echo "    Ensured table ${PROJECT_ID}.${DS_METRICS}.benchmark_runs."
 if [[ "${SKIP_RESERVATION}" == "true" ]]; then
   echo "==> [5/6] Skipping BigQuery slot reservation (--skip-reservation set)."
 else
-  echo "==> [5/6] Configuring BigQuery Enterprise reservation ${BQ_RESERVATION_NAME} (${BQ_SLOT_CAP} max slots)..."
-  if bq show --reservation --project_id="${BQ_ADMIN_PROJECT_ID}" --location="${BQ_LOCATION}" --format=json "${BQ_RESERVATION_NAME}" >/dev/null 2>&1; then
-    echo "    Reservation ${BQ_ADMIN_PROJECT_ID}:${BQ_LOCATION}.${BQ_RESERVATION_NAME} already exists."
+  if [[ ! "${BQ_BASELINE_SLOTS}" =~ ^[0-9]+$ || ! "${BQ_SLOT_CAP}" =~ ^[0-9]+$ || "${BQ_SLOT_CAP}" -le 0 ]]; then
+    echo "ERROR: Invalid BQ_BASELINE_SLOTS='${BQ_BASELINE_SLOTS}' or BQ_SLOT_CAP='${BQ_SLOT_CAP}'." >&2
+    exit 1
+  fi
+  if [[ "${BQ_BASELINE_SLOTS}" -gt "${BQ_SLOT_CAP}" ]]; then
+    echo "ERROR: BQ_BASELINE_SLOTS (${BQ_BASELINE_SLOTS}) cannot exceed BQ_SLOT_CAP (${BQ_SLOT_CAP})." >&2
+    exit 1
+  fi
+
+  echo "==> [5/6] Configuring BigQuery Enterprise reservation ${BQ_RESERVATION_NAME} (baseline=${BQ_BASELINE_SLOTS}, max_slots=${BQ_SLOT_CAP})..."
+  if existing_res_json="$(bq show --reservation --project_id="${BQ_ADMIN_PROJECT_ID}" --location="${BQ_LOCATION}" --format=json "${BQ_RESERVATION_NAME}" 2>/dev/null)"; then
+    desired_autoscale=0
+    if [[ "${BQ_BASELINE_SLOTS}" -lt "${BQ_SLOT_CAP}" ]]; then
+      desired_autoscale="${BQ_SLOT_CAP}"
+    fi
+    res_needs_update="$(python3 - "${existing_res_json}" "${BQ_BASELINE_SLOTS}" "${desired_autoscale}" <<'PY'
+import json
+import sys
+
+raw, want_base, want_auto = sys.argv[1:4]
+idx = raw.find("{")
+if idx == -1:
+    print("0")
+    sys.exit(0)
+obj = json.loads(raw[idx:])
+cur_base = int(obj.get("slotCapacity") or 0)
+cur_auto = int(((obj.get("autoscale") or {}).get("maxSlots")) or 0)
+print("1" if (cur_base != int(want_base) or cur_auto != int(want_auto)) else "0")
+PY
+)"
+    if [[ "${res_needs_update}" == "1" ]]; then
+      echo "    Updating reservation ${BQ_ADMIN_PROJECT_ID}:${BQ_LOCATION}.${BQ_RESERVATION_NAME} to baseline=${BQ_BASELINE_SLOTS}, autoscale_max_slots=${desired_autoscale}..."
+      bq update --reservation \
+        --project_id="${BQ_ADMIN_PROJECT_ID}" \
+        --location="${BQ_LOCATION}" \
+        --slots="${BQ_BASELINE_SLOTS}" \
+        --autoscale_max_slots="${desired_autoscale}" \
+        "${BQ_RESERVATION_NAME}"
+    else
+      echo "    Reservation ${BQ_ADMIN_PROJECT_ID}:${BQ_LOCATION}.${BQ_RESERVATION_NAME} already matches desired capacity."
+    fi
   else
-    if ! bq mk --reservation \
-      --project_id="${BQ_ADMIN_PROJECT_ID}" \
-      --location="${BQ_LOCATION}" \
-      --edition=ENTERPRISE \
-      --slots=0 \
-      --autoscale_max_slots="${BQ_SLOT_CAP}" \
-      "${BQ_RESERVATION_NAME}"; then
+    mk_res_cmd=(
+      bq mk --reservation
+      --project_id="${BQ_ADMIN_PROJECT_ID}"
+      --location="${BQ_LOCATION}"
+      --edition=ENTERPRISE
+      --slots="${BQ_BASELINE_SLOTS}"
+    )
+    if [[ "${BQ_BASELINE_SLOTS}" -lt "${BQ_SLOT_CAP}" ]]; then
+      mk_res_cmd+=(--autoscale_max_slots="${BQ_SLOT_CAP}")
+    fi
+    mk_res_cmd+=("${BQ_RESERVATION_NAME}")
+    if ! "${mk_res_cmd[@]}"; then
       echo "ERROR: Failed to create reservation '${BQ_RESERVATION_NAME}'. If this sandbox lacks reservation admin quota, re-run with --skip-reservation." >&2
       exit 1
     fi
@@ -524,7 +568,7 @@ echo "    Bucket:      gs://${BENCH_BUCKET}"
 echo "    BigLake:     ${PROJECT_ID}.${BQ_LOCATION_LOWER}.${BIGLAKE_CONNECTION_ID} (SA: ${BIGLAKE_SA})"
 echo "    Datasets:    ${DS_BRONZE_BIGLAKE}, ${DS_BRONZE_NATIVE}, ${DS_SILVER_BQ}, ${DS_GOLD_BQ}, ${DS_METRICS}"
 if [[ "${SKIP_RESERVATION}" == "false" ]]; then
-  echo "    Reservation: ${BQ_ADMIN_PROJECT_ID}:${BQ_LOCATION}.${BQ_RESERVATION_NAME} (max_slots=${BQ_SLOT_CAP})"
+  echo "    Reservation: ${BQ_ADMIN_PROJECT_ID}:${BQ_LOCATION}.${BQ_RESERVATION_NAME} (baseline=${BQ_BASELINE_SLOTS}, max_slots=${BQ_SLOT_CAP})"
 fi
 if [[ "${CLUSTERS_MODE}" != "none" ]]; then
   echo "    Clusters:    mode=${CLUSTERS_MODE} (${CLUSTER_STD_NAME}, ${CLUSTER_LGT_NAME} in ${DATAPROC_REGION})"
