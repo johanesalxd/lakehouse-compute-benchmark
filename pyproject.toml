@@ -1,0 +1,23 @@
+[project]
+name = "lakehouse-compute-benchmark"
+version = "0.1.0"
+description = "Reproducible Medallion compute benchmark on Google Cloud comparing Dataproc Standard Spark, Dataproc Lightning Engine (Base + Gluten/Velox NQE), and BigQuery DataFrames (BigFrames 2.x) on TPC-DS."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "bigframes>=2.40.0",
+    "google-cloud-bigquery>=3.26.0",
+    "google-cloud-bigquery-reservation>=1.17.0",
+    "google-cloud-dataproc>=5.15.0",
+    "google-cloud-storage>=2.18.0",
+    "ipykernel>=6.29.0",
+    "matplotlib>=3.9.0",
+    "nbformat>=5.10.0",
+    "numpy>=1.26.0",
+    "pandas>=2.2.0",
+    "pyarrow>=16.0.0",
+    "pyspark>=3.5.0,<4.0.0",
+    "python-dotenv>=1.0.1",
+    "seaborn>=0.13.2",
+]
