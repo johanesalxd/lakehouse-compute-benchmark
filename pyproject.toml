@@ -9,6 +9,7 @@ dependencies = [
     "bigframes>=2.40.0",
     "google-cloud-bigquery>=3.26.0",
     "google-cloud-bigquery-reservation>=1.17.0",
+    "google-cloud-bigquery-storage>=2.27.0",
     "google-cloud-dataproc>=5.15.0",
     "google-cloud-storage>=2.18.0",
     "ipykernel>=6.29.0",
@@ -20,4 +21,10 @@ dependencies = [
     "pyspark>=3.5.0,<4.0.0",
     "python-dotenv>=1.0.1",
     "seaborn>=0.13.2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
 ]

@@ -24,7 +24,9 @@ Every design choice in this repository isolates **Compute Engine throughput** fr
    - Uses official `bigframes.pandas as bpd` (`>=2.40.0`) with `bpd.options.bigquery.ordering_mode = "partial"` for distributed SQL pushdown without unnecessary global ordering hashes.
    - Evaluates both `biglake_gcs_parquet` (same GCS bytes as Spark) and `bq_native_capacitor` (`PHYSICAL` storage billing).
    - Executes inside a capped BigQuery Enterprise Edition autoscale reservation (`BQ_SLOT_CAP`, default `100` slots) and inspects `INFORMATION_SCHEMA.JOBS_BY_PROJECT` for exact `total_slot_ms` and `total_bytes_processed`.
-4. **Intra-US Zero-Egress Topology:** BigQuery datasets (`US`), GCS bucket (`US`), and Dataproc GCE clusters (`us-central1`) stay intra-US for `$0.00` GCS data-transfer egress.
+4. **Intra-`US` Zero-Egress or Regional Single-Location Portability:**
+   - **Default `US` Multi-Region (`BQ_LOCATION=US`, `GCS_LOCATION=US`, `DATAPROC_REGION=us-central1`):** Keeps BigQuery, GCS, and Dataproc intra-`US` (`$0.00` egress) across all 3 scale presets (`small_1g`, `medium_100g`, `large_500g`) via SQL `CTAS` from `bigquery-public-data.tpc_ds_*`.
+   - **Restricted Regional Locations (`BQ_LOCATION != US`, e.g. `asia-southeast1` or `us-central1` under `constraints/gcp.resourceLocations`):** `scripts/stage_tpcds_cross_region.py` streams all 8 `small_1g` tables through the BigQuery Storage Read API (Arrow -> Snappy Parquet) directly into regional GCS and regional BigQuery datasets with **zero `US` datasets or `US` buckets created**. (`medium_100g` and `large_500g` slice `tpc_ds_10t` intra-`US` and fail fast when `BQ_LOCATION != US`.)
 5. **Zero-Code Scale Portability:** Switch `SCALE_PRESET` in `.env` (`small_1g` -> `medium_100g` -> `large_500g`) and re-run `00_data_copy_ingestion.ipynb` only; notebooks `01`–`04` execute unchanged.
 
 ### Measurement Boundary & Storage Scope Nuances
@@ -123,12 +125,16 @@ Staged variants (Passes `1–6`) execute the exact same 4 pipeline stages (`SPEC
 ├── .env.example                             # Environment template (copy to .env; never commit .env)
 ├── SPEC.md                                  # Authoritative parity, schema, and guardrail contract
 ├── pyproject.toml                           # uv / Python 3.11+ dependencies
+├── docs/
+│   └── spark-dependency-packaging.md        # Air-gapped (--no-address) Spark Python dependency modes (A/C/D)
 ├── scripts/
-│   ├── provision_infra.sh                   # Idempotent GCP API, GCS, BigLake, BQ, and Dataproc setup
-│   ├── teardown_infra.sh                    # Safe cluster/reservation teardown (--confirm, --purge-data)
-│   ├── metrics_helper.py                    # Shared 21-field telemetry logger & .env config resolver
+│   ├── provision_infra.sh                   # Idempotent API, GCS, BigLake, BQ, VPC/SA, and Dataproc setup
+│   ├── teardown_infra.sh                    # Granular cluster/reservation/data/VPC teardown (--confirm)
+│   ├── stage_tpcds_cross_region.py          # Cross-region Storage-Read TPC-DS small_1g ingestion (non-US)
+│   ├── metrics_helper.py                    # Shared 21-field telemetry, regional list rates & .env resolver
 │   ├── run_spark_medallion.py               # Shared PySpark Medallion runner for 01 and 02
-│   └── generate_sample_telemetry.py         # Deterministic offline dry-run telemetry generator
+│   ├── generate_sample_telemetry.py         # Deterministic offline dry-run telemetry generator
+│   └── check_identifiers.sh                 # Public-repo leak guard against internal/personal identifiers
 ├── notebooks/
 │   ├── 00_data_copy_ingestion.ipynb         # Bronze TPC-DS ingestion to BQ Native + GCS Parquet + BigLake
 │   ├── 01_medallion_spark_standard.ipynb    # Dataproc Standard Spark execution & telemetry
@@ -163,29 +169,47 @@ uv sync
 ./scripts/provision_infra.sh
 ```
 
+`provision_infra.sh` is hardened for enterprise org policies (`skipDefaultNetworkCreation`, `automaticIamGrantsForDefaultServiceAccounts`, `vmExternalIpAccess`, and `resourceLocations`):
+- Creates custom VPC `bench-vpc` + Private Google Access subnet `bench-pga-${DATAPROC_REGION}` (`NO Cloud NAT`) and `bench-allow-internal` firewall without ever modifying `default` (unless `--subnet=default` is passed).
+- Creates and binds a dedicated least-privilege Dataproc service account (`${DATAPROC_SA_NAME:-bench-dataproc-runner}`) with `roles/dataproc.worker`, bucket `roles/storage.objectAdmin`, and `${DS_METRICS}` `dataViewer`/`dataEditor`.
+- Launches clusters with `--no-address`, `--shielded-secure-boot`, `--max-idle=${CLUSTER_MAX_IDLE:-30m}`, and `--max-age=${CLUSTER_MAX_AGE:-4h}`.
+
 Useful flags:
-- `--clusters=both|std|lightning|none` — provision only one Dataproc cluster or skip clusters while testing BigFrames (`default: both`)
+- `--clusters=both|std|lightning|none` — provision one Dataproc cluster, both, or none (`default: both`)
+- `--network=<name>` / `--subnet=<name>` / `--create-subnet` — target an existing custom/shared subnet or create one on a custom VPC
+- `--reuse-reservation[=<name>]` — verify an existing BigQuery reservation and `QUERY` assignment without modifying or resizing it
 - `--skip-reservation` — skip BigQuery Enterprise slot reservation creation/assignment in restricted sandboxes
+
+**Common Enterprise & Companion Sandbox Recipes:**
+- **Regional single-region run (e.g. `asia-southeast1`, `small_1g`):** Set `BQ_LOCATION=asia-southeast1`, `GCS_LOCATION=asia-southeast1`, `DATAPROC_REGION=asia-southeast1`, `DATAPROC_ZONE=asia-southeast1-a`, `SCALE_PRESET=small_1g` in `.env`, then run `./scripts/provision_infra.sh` and `00_data_copy_ingestion.ipynb` (which streams `small_1g` cross-region via BigQuery Storage Read API with zero `US` resources created).
+- **Low regional vCPU quota (`N2D_CPUS` / `CPUS < 40`, sequential `20`-vCPU mode):** Run `./scripts/provision_infra.sh --clusters=std` -> execute Notebook `01` -> `./scripts/teardown_infra.sh --clusters=std --keep-reservation --confirm` -> `./scripts/provision_infra.sh --clusters=lightning` -> execute Notebook `02`.
+- **Reusing an existing sandbox VPC subnet & reservation:**
+  `./scripts/provision_infra.sh --subnet=sandbox-pga-asia-southeast1 --reuse-reservation=sandbox-elt-cap`
+- **Adding Spark Python dependencies offline (no NAT / `--no-address`):** See [docs/spark-dependency-packaging.md](docs/spark-dependency-packaging.md) for Modes A (Custom Image), C (`--archives` + `venv-pack`), and D (Custom Container running as `spark` UID/GID `1099`).
 
 ### 4. Run Notebooks Sequentially (`00` -> `04`)
 
-1. **`notebooks/00_data_copy_ingestion.ipynb`** — Copies the 8 TPC-DS tables into `DS_BRONZE_NATIVE`, exports clean Snappy Parquet shards to `gs://${BENCH_BUCKET}/bronze/${SCALE_PRESET}/`, mounts `DS_BRONZE_BIGLAKE`, and asserts 100% row-count parity (supports `INGEST_MODE=native_only` for fast native backfills).
+1. **`notebooks/00_data_copy_ingestion.ipynb`** — In `BQ_LOCATION=US`, copies all 8 TPC-DS tables at `small_1g`, `medium_100g`, or `large_500g` intra-`US` (`$0.00` egress) via SQL `CTAS` + `EXPORT DATA`; in non-`US` regions (`small_1g` only; `100g`/`500g` fail fast), delegates to `scripts/stage_tpcds_cross_region.py` (BigQuery Storage Read API -> regional GCS Parquet -> regional Native `PHYSICAL` + BigLake). Supports `INGEST_MODE=native_only` and asserts 100% row-count parity.
 2. **`notebooks/01_medallion_spark_standard.ipynb`** — Submits `scripts/run_spark_medallion.py` (`--engine-variant=spark_standard`) to `${CLUSTER_STD_NAME}` and logs stage metrics.
 3. **`notebooks/02_medallion_spark_lightning.ipynb`** — Runs `spark_lightning_base` (`runtime=default`) and `spark_lightning_nqe` (`runtime=native`) sequentially on `${CLUSTER_LGT_NAME}`, inspects Gluten/Velox vs. JVM fallback plans, and logs stage metrics.
 4. **`notebooks/03_medallion_bigquery_bigframes.ipynb`** — Verifies slot reservation governance and executes Passes 4–7 (`BF_PASS_FILTER="all"` or comma-separated subset from `biglake,native,ctas_native,lazy_e2e`) via `bigframes.pandas` (`ordering_mode="partial"`), contrasting `to_gbq(replace)` vs. single-pass Clustered CTAS (`df.sql`) vs. Lazy E2E Pipeline Fusion (`stage_e2e_bronze_to_gold`), capturing `INFORMATION_SCHEMA.JOBS_BY_PROJECT` slot/byte telemetry.
-5. **`notebooks/04_benchmark_summary_and_tco.ipynb`** — Loads `results/live_runs/benchmark_runs.jsonl` (or falls back cleanly to `results/sample_benchmark_runs.jsonl` offline), runs the 7-variant Gold/stage parity audit, renders 3-scale latency/equivalency/cost scaling curves, separates 1:1 checkpoint-equivalent engines from Pass 7 Pipeline Fusion, and computes parameterized TCO comparisons.
+5. **`notebooks/04_benchmark_summary_and_tco.ipynb`** — Loads `results/live_runs/benchmark_runs.jsonl` (or falls back cleanly to `results/sample_benchmark_runs.jsonl` offline), runs the 7-variant Gold/stage parity audit, renders 3-scale latency/equivalency/cost scaling curves, separates 1:1 checkpoint-equivalent engines from Pass 7 Pipeline Fusion, and computes regionalized TCO comparisons (`get_list_rates`).
 
 > **Offline Dry-Run:** You can execute `notebooks/04_benchmark_summary_and_tco.ipynb` immediately after `uv sync` with zero GCP resources provisioned—it automatically detects the absence of live logs and renders the full 7-variant, 3-scale TCO and parity suite from `results/sample_benchmark_runs.jsonl`.
 
 ### 5. Tear Down Infrastructure
 
-Stop Dataproc VMs and delete the BigQuery reservation/assignment immediately after benchmarking (preserving datasets and GCS data by default):
+Stop Dataproc VMs and delete the benchmark BigQuery reservation/assignment immediately after benchmarking (preserving datasets, GCS data, and external reservations such as `sandbox-elt-cap` by default):
 
 ```bash
 ./scripts/teardown_infra.sh --confirm
 ```
 
-To permanently delete all benchmark datasets, the BigLake connection, and the GCS bucket as well:
+Granular / sequential-mode options:
+- `--clusters=both|std|lightning|none` — delete only one cluster (useful between Notebooks `01` and `02` in sequential 20-vCPU mode) or skip cluster deletion
+- `--keep-reservation` — preserve the BigQuery reservation and `QUERY` assignment (always preserves foreign/shared `sandbox-elt-cap` unless `--force-delete-reservation` is passed)
+
+To permanently delete all 5 benchmark datasets, the BigLake connection, `${BENCH_BUCKET}`, Dataproc auto-created `dataproc-temp-*`/`dataproc-staging-*` buckets, and `bench-*` SA/firewall/subnet/VPC resources (`--purge-data` never touches `airport-ops-*` buckets or `sandbox-*` VPC resources):
 
 ```bash
 ./scripts/teardown_infra.sh --confirm --purge-data
@@ -195,7 +219,7 @@ To permanently delete all benchmark datasets, the BigLake connection, and the GC
 
 ## TCO & Economic Methodology (`04_benchmark_summary_and_tco.ipynb`)
 
-All unit rates live in a single parameterized configuration cell at the top of `04_benchmark_summary_and_tco.ipynb` (defaulting to `us-central1` GCE/Dataproc and `US` multi-region BigQuery Enterprise Edition list prices):
+All unit rates come from `scripts.metrics_helper.get_list_rates(...)` (`REGIONAL_LIST_RATES` supporting `US`/`us-central1` and `asia-southeast1`, plus `PRICING_*` env overrides; `US` defaults match `US_LIST_RATES` identically):
 
 - **Dataproc GCE Standard:** `(VM vCPU + RAM + $0.010/vCPU-hr Dataproc fee + NVMe Local SSD) * cluster_hours`, inferring exact per-scale worker & NVMe Local SSD counts (`2` SSDs on `2 x n2d-standard-8` vs. `8` SSDs on `4 x n2d-standard-16`) and toggling across **100% On-Demand**, **15% Primary 1-Yr CUD + 85% Spot EFM**, **1-Yr CUD**, and **3-Yr CUD**.
 - **Dataproc Lightning Engine:** Adds the **`+$0.0025 / vCPU-hr`** Lightning Engine surcharge on top of Standard, calculating both the **empirical break-even speedup %** (`~4–10%` on On-Demand VMs, higher on heavy Spot blends) and net cost delta against measured wall-clock speedup.

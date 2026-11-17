@@ -7,6 +7,7 @@ appends them to BigQuery ``${DS_METRICS}.benchmark_runs``.
 
 from __future__ import annotations
 
+import copy
 from datetime import datetime, timezone
 import json
 import math
@@ -121,6 +122,109 @@ US_LIST_RATES: dict[str, Any] = {
     "bq_enterprise_slot_hr_usd": 0.060,
 }
 
+# Regional reference list rates keyed by GCP region or BigQuery multi-region/location.
+# `US` and `us-central1` preserve 100% numeric parity with `US_LIST_RATES`.
+REGIONAL_LIST_RATES: dict[str, dict[str, Any]] = {
+    "US": {
+        **copy.deepcopy(US_LIST_RATES),
+        "storage_monthly_usd": {
+            "gcs_standard_per_gb": 0.026,
+            "bq_active_physical_per_gib": 0.040,
+            "bq_long_term_physical_per_gib": 0.020,
+        },
+    },
+    "us-central1": {
+        **copy.deepcopy(US_LIST_RATES),
+        "storage_monthly_usd": {
+            "gcs_standard_per_gb": 0.020,
+            "bq_active_physical_per_gib": 0.040,
+            "bq_long_term_physical_per_gib": 0.020,
+        },
+    },
+    "asia-southeast1": {
+        "gce_vcpu_hr_by_family": {
+            "n2d-standard": 0.033920,
+            "n2-standard": 0.034620,
+            "e2-standard": 0.023890,
+            "c2-standard": 0.037220,
+            "n2d-highmem": 0.033920,
+            "n2-highmem": 0.034620,
+        },
+        "gce_ram_gb_hr_by_family": {
+            "n2d-standard": 0.004545,
+            "n2-standard": 0.004639,
+            "e2-standard": 0.003203,
+            "c2-standard": 0.004987,
+            "n2d-highmem": 0.004545,
+            "n2-highmem": 0.004639,
+        },
+        "gce_ram_gb_per_vcpu_by_family": dict(US_LIST_RATES["gce_ram_gb_per_vcpu_by_family"]),
+        "default_machine_family": "n2d-standard",
+        "dataproc_gce_fee_per_vcpu_hr": 0.010,
+        "dataproc_lightning_surcharge_per_vcpu_hr": 0.0025,
+        "local_ssd_gb_per_disk": 375.0,
+        "local_ssd_usd_per_gb_month": 0.096,
+        "hours_per_month": 730.0,
+        "default_worker_local_ssds": 1,
+        "bq_enterprise_slot_hr_usd": 0.072,
+        "storage_monthly_usd": {
+            "gcs_standard_per_gb": 0.020,
+            "bq_active_physical_per_gib": 0.044,
+            "bq_long_term_physical_per_gib": 0.022,
+        },
+    },
+}
+
+_REGIONAL_LOOKUP_LOWER: dict[str, str] = {k.lower(): k for k in REGIONAL_LIST_RATES}
+
+
+def get_list_rates(region_or_location: str | None = None) -> dict[str, Any]:
+    """Return parameterized GCP list rates for a region/location with optional env overrides.
+
+    Defaults to ``US`` (identical to ``US_LIST_RATES`` for zero drift on
+    ``results/sample_benchmark_runs.jsonl``). Recognizes ``US``, ``us-central1``,
+    and ``asia-southeast1`` (case-insensitive), falling back to ``US`` rates for
+    other regions while honoring explicit ``PRICING_*`` numeric environment
+    variable overrides.
+    """
+    raw = (
+        region_or_location
+        if region_or_location is not None and str(region_or_location).strip()
+        else (os.environ.get("PRICING_REGION") or "US")
+    )
+    key = _REGIONAL_LOOKUP_LOWER.get(str(raw).strip().lower(), "US")
+    rates: dict[str, Any] = copy.deepcopy(REGIONAL_LIST_RATES[key])
+
+    default_fam = str(rates["default_machine_family"])
+    if os.environ.get("PRICING_GCE_VCPU_HR", "").strip():
+        val = float(os.environ["PRICING_GCE_VCPU_HR"])
+        rates["gce_vcpu_hr_by_family"][default_fam] = val
+    if os.environ.get("PRICING_GCE_RAM_GB_HR", "").strip():
+        val = float(os.environ["PRICING_GCE_RAM_GB_HR"])
+        rates["gce_ram_gb_hr_by_family"][default_fam] = val
+
+    scalar_overrides = {
+        "PRICING_DATAPROC_FEE_VCPU_HR": "dataproc_gce_fee_per_vcpu_hr",
+        "PRICING_LIGHTNING_SURCHARGE_VCPU_HR": "dataproc_lightning_surcharge_per_vcpu_hr",
+        "PRICING_LOCAL_SSD_USD_GB_MONTH": "local_ssd_usd_per_gb_month",
+        "PRICING_BQ_SLOT_HR_USD": "bq_enterprise_slot_hr_usd",
+    }
+    for env_key, rate_key in scalar_overrides.items():
+        if os.environ.get(env_key, "").strip():
+            rates[rate_key] = float(os.environ[env_key])
+
+    storage_overrides = {
+        "PRICING_GCS_STANDARD_GB_MONTH": "gcs_standard_per_gb",
+        "PRICING_BQ_ACTIVE_PHYSICAL_GIB_MONTH": "bq_active_physical_per_gib",
+        "PRICING_BQ_LONG_TERM_PHYSICAL_GIB_MONTH": "bq_long_term_physical_per_gib",
+    }
+    for env_key, rate_key in storage_overrides.items():
+        if os.environ.get(env_key, "").strip():
+            rates["storage_monthly_usd"][rate_key] = float(os.environ[env_key])
+
+    return rates
+
+
 _DEFAULT_ENV_CONFIG: dict[str, str] = {
     "PROJECT_ID": "",
     "PROJECT_NUMBER": "",
@@ -129,6 +233,13 @@ _DEFAULT_ENV_CONFIG: dict[str, str] = {
     "DATAPROC_REGION": "us-central1",
     "DATAPROC_ZONE": "us-central1-a",
     "BENCH_BUCKET": "",
+    "BENCH_NETWORK": "bench-vpc",
+    "BENCH_SUBNET": "",
+    "BENCH_SUBNET_CIDR": "10.20.0.0/24",
+    "DATAPROC_SA_NAME": "bench-dataproc-runner",
+    "CLUSTER_MAX_IDLE": "30m",
+    "CLUSTER_MAX_AGE": "4h",
+    "PRICING_REGION": "",
     "SCALE_PRESET": "small_1g",
     "DATAPROC_IMAGE_VERSION": "2.3-debian12",
     "CLUSTER_STD_NAME": "bench-spark-std-x86",
@@ -254,6 +365,13 @@ def resolve_bench_config(
     if not resolved.get("BENCH_BUCKET") and resolved.get("PROJECT_NUMBER"):
         resolved["BENCH_BUCKET"] = f"lakehouse-bench-{resolved['PROJECT_NUMBER']}"
 
+    if (
+        not os.environ.get("BIGLAKE_CONNECTION_ID", "").strip()
+        and not dotenv_values.get("BIGLAKE_CONNECTION_ID", "").strip()
+    ):
+        bq_loc = (resolved.get("BQ_LOCATION") or "US").strip().lower()
+        resolved["BIGLAKE_CONNECTION_ID"] = f"bench-biglake-{bq_loc}"
+
     try:
         worker_vcpus = infer_vcpus_from_machine_type(resolved["WORKER_MACHINE_TYPE"])
         num_workers = int(resolved["NUM_PRIMARY_WORKERS"])
@@ -291,16 +409,19 @@ def infer_vcpus_from_machine_type(machine_type: str) -> int:
     raise ValueError(f"Unable to infer vCPU count from machine_type={machine_type!r}")
 
 
-def _extract_machine_family(machine_type: str | None) -> str:
+def _extract_machine_family(
+    machine_type: str | None, rates: dict[str, Any] | None = None
+) -> str:
     """Extract GCE machine family prefix (e.g. ``n2d-standard-8`` -> ``n2d-standard``)."""
+    active_rates = rates if rates is not None else US_LIST_RATES
     if not machine_type:
-        return str(US_LIST_RATES["default_machine_family"])
+        return str(active_rates["default_machine_family"])
     parts = machine_type.strip().split("-")
     if len(parts) >= 2:
         candidate = f"{parts[0]}-{parts[1]}"
-        if candidate in US_LIST_RATES["gce_vcpu_hr_by_family"]:
+        if candidate in active_rates["gce_vcpu_hr_by_family"]:
             return candidate
-    return str(US_LIST_RATES["default_machine_family"])
+    return str(active_rates["default_machine_family"])
 
 
 def estimate_stage_list_cost_usd(
@@ -312,25 +433,30 @@ def estimate_stage_list_cost_usd(
     bq_slot_cap: int | None = None,
     bq_total_slot_ms: int | None = None,
     num_worker_local_ssds: int | None = None,
+    region_or_location: str | None = None,
 ) -> float | None:
-    """Estimate stage compute list cost in USD using parameterized US list rates.
+    """Estimate stage compute list cost in USD using parameterized regional list rates.
 
-    For Dataproc Spark variants, prices active worker vCPU-hours (VM vCPU + RAM +
-    Dataproc GCE fee + worker NVMe Local SSDs + Lightning Engine surcharge when
-    applicable). For BigFrames variants, prices consumed BigQuery Enterprise
-    Edition slot-hours (falling back to ``bq_slot_cap * wall_clock_hours`` if
-    ``bq_total_slot_ms`` is unavailable).
+    Defaults to ``US`` (identical to ``US_LIST_RATES``) unless
+    ``region_or_location`` or ``PRICING_REGION`` / ``PRICING_*`` env overrides
+    are provided. For Dataproc Spark variants, prices active worker vCPU-hours
+    (VM vCPU + RAM + Dataproc GCE fee + worker NVMe Local SSDs + Lightning
+    Engine surcharge when applicable). For BigFrames variants, prices consumed
+    BigQuery Enterprise Edition slot-hours (falling back to
+    ``bq_slot_cap * wall_clock_hours`` if ``bq_total_slot_ms`` is unavailable).
     """
+    rates = get_list_rates(region_or_location)
+
     if engine_variant in SPARK_ENGINE_VARIANTS:
         if total_worker_vcpus is None:
             return None
-        family = _extract_machine_family(worker_machine_type)
-        vcpu_hr_rate = float(US_LIST_RATES["gce_vcpu_hr_by_family"][family])
-        ram_gb_per_vcpu = float(US_LIST_RATES["gce_ram_gb_per_vcpu_by_family"][family])
-        ram_hr_rate = float(US_LIST_RATES["gce_ram_gb_hr_by_family"][family]) * ram_gb_per_vcpu
-        dp_fee = float(US_LIST_RATES["dataproc_gce_fee_per_vcpu_hr"])
+        family = _extract_machine_family(worker_machine_type, rates=rates)
+        vcpu_hr_rate = float(rates["gce_vcpu_hr_by_family"][family])
+        ram_gb_per_vcpu = float(rates["gce_ram_gb_per_vcpu_by_family"][family])
+        ram_hr_rate = float(rates["gce_ram_gb_hr_by_family"][family]) * ram_gb_per_vcpu
+        dp_fee = float(rates["dataproc_gce_fee_per_vcpu_hr"])
         lightning_fee = (
-            float(US_LIST_RATES["dataproc_lightning_surcharge_per_vcpu_hr"])
+            float(rates["dataproc_lightning_surcharge_per_vcpu_hr"])
             if engine_variant in ("spark_lightning_base", "spark_lightning_nqe")
             else 0.0
         )
@@ -338,12 +464,12 @@ def estimate_stage_list_cost_usd(
         ssds_per_worker = (
             int(num_worker_local_ssds)
             if num_worker_local_ssds is not None
-            else int(US_LIST_RATES["default_worker_local_ssds"])
+            else int(rates["default_worker_local_ssds"])
         )
         ssd_hr_per_disk = (
-            float(US_LIST_RATES["local_ssd_gb_per_disk"])
-            * float(US_LIST_RATES["local_ssd_usd_per_gb_month"])
-            / float(US_LIST_RATES["hours_per_month"])
+            float(rates["local_ssd_gb_per_disk"])
+            * float(rates["local_ssd_usd_per_gb_month"])
+            / float(rates["hours_per_month"])
         )
         per_worker_vcpus = 8
         if worker_machine_type:
@@ -358,7 +484,7 @@ def estimate_stage_list_cost_usd(
         return round(worker_vcpu_hours * total_rate_per_vcpu_hr, 6)
 
     if engine_variant in BIGQUERY_ENGINE_VARIANTS:
-        slot_rate = float(US_LIST_RATES["bq_enterprise_slot_hr_usd"])
+        slot_rate = float(rates["bq_enterprise_slot_hr_usd"])
         if bq_total_slot_ms is not None:
             slot_hours = (float(bq_total_slot_ms) / 1000.0) / 3600.0
             return round(slot_hours * slot_rate, 6)
@@ -429,6 +555,7 @@ def log_stage_metric(
     write_to_bq: bool = False,
     project_id: str | None = None,
     ds_metrics: str | None = None,
+    region_or_location: str | None = None,
 ) -> dict[str, Any]:
     """Validate, enrich, and persist a single stage benchmark metric record.
 
@@ -498,6 +625,7 @@ def log_stage_metric(
             total_worker_vcpus=vcpus_val,
             bq_slot_cap=int(bq_slot_cap) if bq_slot_cap is not None else None,
             bq_total_slot_ms=int(bq_total_slot_ms) if bq_total_slot_ms is not None else None,
+            region_or_location=region_or_location,
         )
     )
 
