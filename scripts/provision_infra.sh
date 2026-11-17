@@ -11,7 +11,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-ENV_FILE="${REPO_ROOT}/.env"
+ENV_FILE="${ENV_FILE:-${REPO_ROOT}/.env}"
 
 CLUSTERS_MODE="both"
 SKIP_RESERVATION="false"
@@ -138,11 +138,8 @@ for bin in gcloud bq python3; do
   fi
 done
 
-if [[ -f "${ENV_FILE}" ]]; then
-  set -a
-  # shellcheck disable=SC1090
-  source "${ENV_FILE}"
-  set +a
+if [[ -f "${ENV_FILE}" && "${ENV_FILE}" != "/dev/null" ]]; then
+  eval "$(python3 "${REPO_ROOT}/scripts/metrics_helper.py" --export-unset "${ENV_FILE}")"
 fi
 
 BQ_LOCATION="${BQ_LOCATION:-US}"
@@ -611,13 +608,37 @@ gcloud storage buckets add-iam-policy-binding "gs://${BENCH_BUCKET}" \
   --role="roles/storage.objectAdmin" \
   --condition=None >/dev/null
 
-echo "    Granting BigQuery dataViewer/dataEditor on ${PROJECT_ID}:${DS_METRICS} to ${DATAPROC_SA_EMAIL}..."
-for bq_role in "roles/bigquery.dataViewer" "roles/bigquery.dataEditor"; do
-  bq add-iam-policy-binding -d \
-    --member="serviceAccount:${DATAPROC_SA_EMAIL}" \
-    --role="${bq_role}" \
-    "${PROJECT_ID}:${DS_METRICS}" >/dev/null
-done
+echo "    Granting BigQuery dataEditor (WRITER) on ${PROJECT_ID}:${DS_METRICS} to ${DATAPROC_SA_EMAIL}..."
+ds_metrics_json="$(bq show --project_id="${PROJECT_ID}" --format=json "${PROJECT_ID}:${DS_METRICS}" 2>/dev/null || true)"
+metrics_acl_tmp="$(mktemp)"
+metrics_acl_action="$(python3 - "${ds_metrics_json}" "${DATAPROC_SA_EMAIL}" "${metrics_acl_tmp}" <<'PY'
+import json
+import sys
+
+raw, sa_email, out_path = sys.argv[1:4]
+idx = raw.find("{")
+obj = json.loads(raw[idx:]) if idx != -1 else {}
+access = list(obj.get("access") or [])
+writer_roles = {"WRITER", "roles/bigquery.dataEditor", "OWNER", "roles/bigquery.dataOwner"}
+already_present = any(
+    (e.get("userByEmail") == sa_email or e.get("iamMember") == f"serviceAccount:{sa_email}")
+    and e.get("role") in writer_roles
+    for e in access
+    if isinstance(e, dict)
+)
+if already_present:
+    print("UNCHANGED")
+    sys.exit(0)
+access.append({"role": "WRITER", "userByEmail": sa_email})
+with open(out_path, "w", encoding="utf-8") as fh:
+    json.dump({"access": access}, fh)
+print("UPDATE")
+PY
+)"
+if [[ "${metrics_acl_action}" == "UPDATE" ]]; then
+  bq update --project_id="${PROJECT_ID}" --source="${metrics_acl_tmp}" "${PROJECT_ID}:${DS_METRICS}" >/dev/null
+fi
+rm -f "${metrics_acl_tmp}"
 
 # Resolve VPC & subnet without touching 'default' unless --subnet=default is explicitly passed
 DEFAULT_BENCH_SUBNET="bench-pga-${DATAPROC_REGION}"

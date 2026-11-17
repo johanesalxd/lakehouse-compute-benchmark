@@ -147,7 +147,12 @@ def test_validate_cross_region_fails_fast_non_us_large_scales(bq_loc: str, scale
     assert rc == 1
 
 
-def test_stage_cli_dry_run_derives_regional_connection(capsys: pytest.CaptureFixture[str]) -> None:
+def test_stage_cli_dry_run_derives_regional_connection(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ENV_FILE", "/dev/null")
+    for var in ("PROJECT_ID", "PROJECT_NUMBER", "BENCH_BUCKET", "BIGLAKE_CONNECTION_ID", "BQ_LOCATION", "GCS_LOCATION"):
+        monkeypatch.delenv(var, raising=False)
     rc = cross_region.main(
         ["--bq-location", "asia-southeast1", "--scale-preset", "small_1g", "--dry-run"]
     )
@@ -424,6 +429,9 @@ if subcmd == "show":
             sys.exit(0)
         sys.exit(1)
     ds = args[-1].split(":")[-1]
+    if "--format=json" in args and ds in state.get("datasets", []):
+        print(json.dumps({{"access": state.get("dataset_access", {{}}).get(ds, [])}}))
+        sys.exit(0)
     sys.exit(0 if ds in state.get("datasets", []) else 1)
 if subcmd == "mk":
     if "--connection" in args:
@@ -437,7 +445,14 @@ if subcmd == "query":
     if "--format=csv" in args:
         print("option_value\\nPHYSICAL")
     sys.exit(0)
-if subcmd in ("add-iam-policy-binding", "update", "rm"):
+if subcmd == "update":
+    for a in args:
+        if a.startswith("--source="):
+            src = Path(a.split("=", 1)[1])
+            state["last_bq_update"] = json.loads(src.read_text())
+            Path({str(state_file)!r}).write_text(json.dumps(state))
+    sys.exit(0)
+if subcmd in ("add-iam-policy-binding", "rm"):
     sys.exit(0)
 sys.exit(0)
 """,
@@ -500,6 +515,7 @@ def test_provision_reuses_repo_a_subnet_and_reservation_safely(tmp_path: Path) -
     env = dict(os.environ)
     env.update(
         {
+            "ENV_FILE": "/dev/null",
             "PATH": f"{bin_dir}:{env['PATH']}",
             "PROJECT_ID": "example-proj",
             "PROJECT_NUMBER": "99900011122",
@@ -568,6 +584,7 @@ def test_provision_auto_creates_isolated_bench_vpc_and_fails_on_low_quota(tmp_pa
     env = dict(os.environ)
     env.update(
         {
+            "ENV_FILE": "/dev/null",
             "PATH": f"{bin_dir}:{env['PATH']}",
             "PROJECT_ID": "example-proj",
             "PROJECT_NUMBER": "99900011122",
@@ -611,6 +628,7 @@ def test_provision_rejects_default_compute_sa(tmp_path: Path) -> None:
     default_sa = "99900011122" + "-comp" + "ute@devel" + "oper.gserviceaccount.com"
     env.update(
         {
+            "ENV_FILE": "/dev/null",
             "PATH": f"{bin_dir}:{env['PATH']}",
             "PROJECT_ID": "example-proj",
             "PROJECT_NUMBER": "99900011122",
@@ -647,6 +665,7 @@ def test_provision_defaults_gcs_to_bq_location_and_rejects_mismatch(
     env.pop("GCS_LOCATION", None)
     env.update(
         {
+            "ENV_FILE": "/dev/null",
             "PATH": f"{bin_dir}:{env['PATH']}",
             "PROJECT_ID": "example-proj",
             "PROJECT_NUMBER": "99900011122",
@@ -747,6 +766,7 @@ def test_teardown_granular_clusters_protects_repo_a_and_purges_bench_and_datapro
     env = dict(os.environ)
     env.update(
         {
+            "ENV_FILE": "/dev/null",
             "PATH": f"{bin_dir}:{env['PATH']}",
             "PROJECT_ID": "example-proj",
             "PROJECT_NUMBER": "99900011122",
@@ -811,6 +831,7 @@ def test_teardown_protects_sandbox_elt_cap_even_without_keep_flag(tmp_path: Path
     env = dict(os.environ)
     env.update(
         {
+            "ENV_FILE": "/dev/null",
             "PATH": f"{bin_dir}:{env['PATH']}",
             "PROJECT_ID": "example-proj",
             "PROJECT_NUMBER": "99900011122",
@@ -879,3 +900,121 @@ def test_check_identifiers_catches_leaks_and_passes_clean_files(tmp_path: Path) 
     )
     assert custom_proc.returncode == 1
     assert "extra_forbidden_regex" in custom_proc.stderr
+
+
+def test_dotenv_does_not_overwrite_caller_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    custom_env = tmp_path / "custom.env"
+    custom_env.write_text(
+        'export PROJECT_ID="dotenv-proj"\n'
+        'export PROJECT_NUMBER="11122233344"\n'
+        'export BQ_LOCATION="US"\n'
+        'export GCS_LOCATION="${BQ_LOCATION}"\n'
+        'export DATAPROC_REGION="europe-west4"\n',
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("PROJECT_ID", "example-proj")
+    monkeypatch.setenv("PROJECT_NUMBER", "99900011122")
+    monkeypatch.setenv("BQ_LOCATION", "us-central1")
+    monkeypatch.delenv("GCS_LOCATION", raising=False)
+    monkeypatch.delenv("DATAPROC_REGION", raising=False)
+
+    cfg = mh.resolve_bench_config(env_path=custom_env, repo_root=REPO_ROOT, populate_environ=False)
+    assert cfg["PROJECT_ID"] == "example-proj"
+    assert cfg["PROJECT_NUMBER"] == "99900011122"
+    assert cfg["BQ_LOCATION"] == "us-central1"
+    assert cfg["GCS_LOCATION"] == "us-central1"
+    assert cfg["DATAPROC_REGION"] == "europe-west4"
+
+    bin_dir, log_file = _write_mock_gcp_bin(tmp_path, scenario={"project_id": "example-proj"})
+    env = dict(os.environ)
+    env.pop("GCS_LOCATION", None)
+    env.update(
+        {
+            "ENV_FILE": str(custom_env),
+            "PATH": f"{bin_dir}:{env['PATH']}",
+            "PROJECT_ID": "example-proj",
+            "PROJECT_NUMBER": "99900011122",
+            "BQ_LOCATION": "us-central1",
+            "DATAPROC_REGION": "us-central1",
+            "DATAPROC_ZONE": "us-central1-a",
+        }
+    )
+    subprocess.run(
+        [
+            "bash",
+            str(REPO_ROOT / "scripts" / "provision_infra.sh"),
+            "--clusters=none",
+            "--skip-reservation",
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    calls = log_file.read_text(encoding="utf-8")
+    assert (
+        "storage buckets create gs://lakehouse-bench-99900011122 --project=example-proj --location=us-central1"
+        in calls
+    )
+    assert "dotenv-proj" not in calls
+    assert "--location=US" not in calls
+
+
+def test_provision_grants_metrics_dataset_acl_via_bq_update(tmp_path: Path) -> None:
+    bin_dir, log_file = _write_mock_gcp_bin(
+        tmp_path,
+        scenario={
+            "project_id": "example-proj",
+            "datasets": [
+                "bench_bronze_biglake",
+                "bench_bronze_native",
+                "bench_silver_bq",
+                "bench_gold_bq",
+                "bench_metrics",
+            ],
+            "dataset_access": {
+                "bench_metrics": [{"role": "OWNER", "specialGroup": "projectOwners"}]
+            },
+        },
+    )
+    env = dict(os.environ)
+    env.update(
+        {
+            "ENV_FILE": "/dev/null",
+            "PATH": f"{bin_dir}:{env['PATH']}",
+            "PROJECT_ID": "example-proj",
+            "PROJECT_NUMBER": "99900011122",
+            "BQ_LOCATION": "us-central1",
+            "GCS_LOCATION": "us-central1",
+            "DATAPROC_REGION": "us-central1",
+            "DATAPROC_ZONE": "us-central1-a",
+        }
+    )
+    subprocess.run(
+        [
+            "bash",
+            str(REPO_ROOT / "scripts" / "provision_infra.sh"),
+            "--clusters=none",
+            "--skip-reservation",
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    calls = log_file.read_text(encoding="utf-8")
+    assert "bq add-iam-policy-binding" not in calls
+    assert "bq update --project_id=example-proj --source=" in calls
+    state = json.loads((tmp_path / "mock_state.json").read_text(encoding="utf-8"))
+    assert state["last_bq_update"]["access"] == [
+        {"role": "OWNER", "specialGroup": "projectOwners"},
+        {
+            "role": "WRITER",
+            "userByEmail": "bench-dataproc-runner@example-proj.iam.gserviceaccount.com",
+        },
+    ]

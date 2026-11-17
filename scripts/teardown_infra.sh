@@ -9,7 +9,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-ENV_FILE="${REPO_ROOT}/.env"
+ENV_FILE="${ENV_FILE:-${REPO_ROOT}/.env}"
 
 CONFIRM="false"
 PURGE_DATA="false"
@@ -94,11 +94,8 @@ for bin in gcloud bq python3; do
   fi
 done
 
-if [[ -f "${ENV_FILE}" ]]; then
-  set -a
-  # shellcheck disable=SC1090
-  source "${ENV_FILE}"
-  set +a
+if [[ -f "${ENV_FILE}" && "${ENV_FILE}" != "/dev/null" ]]; then
+  eval "$(python3 "${REPO_ROOT}/scripts/metrics_helper.py" --export-unset "${ENV_FILE}")"
 fi
 
 BQ_LOCATION="${BQ_LOCATION:-US}"

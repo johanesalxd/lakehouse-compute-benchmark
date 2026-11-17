@@ -14,6 +14,8 @@ import math
 import os
 from pathlib import Path
 import re
+import shlex
+import sys
 from typing import Any
 
 SPARK_ENGINE_VARIANTS: frozenset[str] = frozenset(
@@ -311,16 +313,25 @@ def _parse_dotenv_file(path: Path) -> dict[str, str]:
             continue
         key, raw_value = match.groups()
         value = _strip_inline_comment(raw_value)
-        # Expand ${VAR} references against previously parsed values and os.environ.
+        # Expand ${VAR} references, prioritizing caller os.environ over parsed .env values.
         value = _VAR_SUB_RE.sub(
-            lambda m: parsed.get(
-                m.group(1) or m.group(2),
-                os.environ.get(m.group(1) or m.group(2), ""),
+            lambda m: (
+                os.environ.get(m.group(1) or m.group(2))
+                or parsed.get(m.group(1) or m.group(2), "")
             ),
             value,
         )
         parsed[key] = value
     return parsed
+
+
+def format_dotenv_unset_exports(env_path: str | Path) -> str:
+    """Render shell ``export`` statements for non-empty `.env` keys not set in ``os.environ``."""
+    lines: list[str] = []
+    for key, value in _parse_dotenv_file(Path(env_path)).items():
+        if not os.environ.get(key) and value != "":
+            lines.append(f"export {key}={shlex.quote(value)}")
+    return "\n".join(lines)
 
 
 def resolve_bench_config(
@@ -344,7 +355,12 @@ def resolve_bench_config(
         Dictionary of resolved benchmark configuration strings.
     """
     root = Path(repo_root).resolve() if repo_root else get_repo_root()
-    candidate_env = Path(env_path).resolve() if env_path else (root / ".env")
+    env_override = os.environ.get("ENV_FILE", "").strip()
+    candidate_env = (
+        Path(env_path).resolve()
+        if env_path
+        else (Path(env_override).resolve() if env_override else (root / ".env"))
+    )
     dotenv_values = _parse_dotenv_file(candidate_env)
 
     resolved: dict[str, str] = {}
@@ -731,3 +747,12 @@ def load_benchmark_runs(
         if records:
             return records
     return []
+
+
+if __name__ == "__main__":
+    if len(sys.argv) == 3 and sys.argv[1] == "--export-unset":
+        exports = format_dotenv_unset_exports(sys.argv[2])
+        if exports:
+            print(exports)
+        raise SystemExit(0)
+    raise SystemExit("Usage: metrics_helper.py --export-unset <env_file>")
