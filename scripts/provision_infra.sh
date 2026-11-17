@@ -609,16 +609,23 @@ gcloud storage buckets add-iam-policy-binding "gs://${BENCH_BUCKET}" \
   --condition=None >/dev/null
 
 echo "    Granting BigQuery dataEditor (WRITER) on ${PROJECT_ID}:${DS_METRICS} to ${DATAPROC_SA_EMAIL}..."
-ds_metrics_json="$(bq show --project_id="${PROJECT_ID}" --format=json "${PROJECT_ID}:${DS_METRICS}" 2>/dev/null || true)"
+if ! ds_metrics_json="$(bq show --project_id="${PROJECT_ID}" --format=json "${PROJECT_ID}:${DS_METRICS}")"; then
+  echo "ERROR: Failed to inspect BigQuery dataset ${PROJECT_ID}:${DS_METRICS} before updating ACL." >&2
+  exit 1
+fi
 metrics_acl_tmp="$(mktemp)"
-metrics_acl_action="$(python3 - "${ds_metrics_json}" "${DATAPROC_SA_EMAIL}" "${metrics_acl_tmp}" <<'PY'
+if ! metrics_acl_action="$(python3 - "${ds_metrics_json}" "${DATAPROC_SA_EMAIL}" "${metrics_acl_tmp}" <<'PY'
 import json
 import sys
 
 raw, sa_email, out_path = sys.argv[1:4]
 idx = raw.find("{")
-obj = json.loads(raw[idx:]) if idx != -1 else {}
+if idx == -1:
+    raise SystemExit(f"ERROR: Expected JSON from bq show on DS_METRICS, got: {raw[:200]!r}")
+obj = json.loads(raw[idx:])
 access = list(obj.get("access") or [])
+if not access:
+    raise SystemExit("ERROR: Refusing to update DS_METRICS ACL because existing access list is empty.")
 writer_roles = {"WRITER", "roles/bigquery.dataEditor", "OWNER", "roles/bigquery.dataOwner"}
 already_present = any(
     (e.get("userByEmail") == sa_email or e.get("iamMember") == f"serviceAccount:{sa_email}")
@@ -634,7 +641,10 @@ with open(out_path, "w", encoding="utf-8") as fh:
     json.dump({"access": access}, fh)
 print("UPDATE")
 PY
-)"
+)"; then
+  rm -f "${metrics_acl_tmp}"
+  exit 1
+fi
 if [[ "${metrics_acl_action}" == "UPDATE" ]]; then
   bq update --project_id="${PROJECT_ID}" --source="${metrics_acl_tmp}" "${PROJECT_ID}:${DS_METRICS}" >/dev/null
 fi

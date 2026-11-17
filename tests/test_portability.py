@@ -429,13 +429,21 @@ if subcmd == "show":
             sys.exit(0)
         sys.exit(1)
     ds = args[-1].split(":")[-1]
+    if state.get("force_bq_show_fail") and ds == state.get("force_bq_show_fail_ds", "bench_metrics") and "--format=json" in args:
+        sys.exit(1)
     if "--format=json" in args and ds in state.get("datasets", []):
-        print(json.dumps({{"access": state.get("dataset_access", {{}}).get(ds, [])}}))
+        ds_acl_map = state.get("dataset_access", {{}})
+        acl = ds_acl_map[ds] if ds in ds_acl_map else [{{"role": "OWNER", "specialGroup": "projectOwners"}}]
+        print(json.dumps({{"access": acl}}))
         sys.exit(0)
     sys.exit(0 if ds in state.get("datasets", []) else 1)
 if subcmd == "mk":
     if "--connection" in args:
         state.setdefault("connections", []).append(args[-1])
+        Path({str(state_file)!r}).write_text(json.dumps(state))
+    elif not any(f in args for f in ("--reservation", "--reservation_assignment", "--table")):
+        ds = args[-1].split(":")[-1]
+        state.setdefault("datasets", []).append(ds)
         Path({str(state_file)!r}).write_text(json.dumps(state))
     sys.exit(0)
 if subcmd == "ls" and "--reservation_assignment" in args:
@@ -1018,3 +1026,56 @@ def test_provision_grants_metrics_dataset_acl_via_bq_update(tmp_path: Path) -> N
             "userByEmail": "bench-dataproc-runner@example-proj.iam.gserviceaccount.com",
         },
     ]
+
+
+@pytest.mark.parametrize(
+    ("scenario_extra", "err_fragment"),
+    [
+        ({"dataset_access": {"bench_metrics": []}}, "existing access list is empty"),
+        ({"force_bq_show_fail": True}, "Failed to inspect BigQuery dataset"),
+    ],
+)
+def test_provision_aborts_when_ds_metrics_show_fails_or_access_empty(
+    tmp_path: Path, scenario_extra: dict[str, object], err_fragment: str
+) -> None:
+    scenario: dict[str, object] = {
+        "project_id": "example-proj",
+        "datasets": [
+            "bench_bronze_biglake",
+            "bench_bronze_native",
+            "bench_silver_bq",
+            "bench_gold_bq",
+            "bench_metrics",
+        ],
+        **scenario_extra,
+    }
+    bin_dir, log_file = _write_mock_gcp_bin(tmp_path, scenario=scenario)
+    env = dict(os.environ)
+    env.update(
+        {
+            "ENV_FILE": "/dev/null",
+            "PATH": f"{bin_dir}:{env['PATH']}",
+            "PROJECT_ID": "example-proj",
+            "PROJECT_NUMBER": "99900011122",
+            "BQ_LOCATION": "us-central1",
+            "GCS_LOCATION": "us-central1",
+            "DATAPROC_REGION": "us-central1",
+            "DATAPROC_ZONE": "us-central1-a",
+        }
+    )
+    proc = subprocess.run(
+        [
+            "bash",
+            str(REPO_ROOT / "scripts" / "provision_infra.sh"),
+            "--clusters=none",
+            "--skip-reservation",
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode != 0
+    assert err_fragment in proc.stderr
+    assert "bq update" not in log_file.read_text(encoding="utf-8")
