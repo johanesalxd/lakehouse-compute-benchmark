@@ -146,8 +146,14 @@ if [[ -f "${ENV_FILE}" ]]; then
 fi
 
 BQ_LOCATION="${BQ_LOCATION:-US}"
-GCS_LOCATION="${GCS_LOCATION:-US}"
+GCS_LOCATION="${GCS_LOCATION:-${BQ_LOCATION}}"
 BQ_LOCATION_LOWER="$(printf '%s' "${BQ_LOCATION}" | tr '[:upper:]' '[:lower:]')"
+GCS_LOCATION_LOWER="$(printf '%s' "${GCS_LOCATION}" | tr '[:upper:]' '[:lower:]')"
+if [[ "${BQ_LOCATION_LOWER}" != "us" && "${GCS_LOCATION_LOWER}" != "${BQ_LOCATION_LOWER}" ]]; then
+  echo "ERROR: Non-US BQ_LOCATION='${BQ_LOCATION}' requires co-located GCS_LOCATION='${BQ_LOCATION}' (got GCS_LOCATION='${GCS_LOCATION}')." >&2
+  echo "       Refusing to create or use a mismatched/US bucket under constraints/gcp.resourceLocations." >&2
+  exit 1
+fi
 DATAPROC_REGION="${DATAPROC_REGION:-us-central1}"
 DATAPROC_ZONE="${DATAPROC_ZONE:-us-central1-a}"
 DATAPROC_IMAGE_VERSION="${DATAPROC_IMAGE_VERSION:-2.3-debian12}"

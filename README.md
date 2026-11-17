@@ -209,7 +209,7 @@ Granular / sequential-mode options:
 - `--clusters=both|std|lightning|none` — delete only one cluster (useful between Notebooks `01` and `02` in sequential 20-vCPU mode) or skip cluster deletion
 - `--keep-reservation` — preserve the BigQuery reservation and `QUERY` assignment (always preserves foreign/shared `sandbox-elt-cap` unless `--force-delete-reservation` is passed)
 
-To permanently delete all 5 benchmark datasets, the BigLake connection, `${BENCH_BUCKET}`, Dataproc auto-created `dataproc-temp-*`/`dataproc-staging-*` buckets, and `bench-*` SA/firewall/subnet/VPC resources (`--purge-data` never touches `airport-ops-*` buckets or `sandbox-*` VPC resources):
+To permanently delete all 5 benchmark datasets, the BigLake connection, `${BENCH_BUCKET}`, Dataproc auto-created `dataproc-temp-*`/`dataproc-staging-*` buckets in `${DATAPROC_REGION}`, and `bench-*` SA/firewall/subnet/VPC resources (`--purge-data` never touches `airport-ops-*` buckets or `sandbox-*` VPC resources; do not run `--purge-data` while Repo A Spark or Spark Connect sessions in `${DATAPROC_REGION}` are actively running):
 
 ```bash
 ./scripts/teardown_infra.sh --confirm --purge-data

@@ -296,8 +296,24 @@ if cmd3 == ("storage", "buckets", "describe"):
     target = args[3].removeprefix("gs://")
     sys.exit(0 if target in state.get("buckets", []) else 1)
 if cmd3 == ("storage", "buckets", "list"):
-    for b in state.get("buckets", []):
-        print(b)
+    want_json = any(a.startswith("--format=json") for a in args)
+    locs = state.get("bucket_locations", {{}})
+    if want_json:
+        out = []
+        for b in state.get("buckets", []):
+            loc = locs.get(b, "")
+            if not loc:
+                if "-asia-southeast1-" in b:
+                    loc = "ASIA-SOUTHEAST1"
+                elif "-us-central1-" in b:
+                    loc = "US-CENTRAL1"
+                else:
+                    loc = state.get("default_bucket_location", "US")
+            out.append({{"name": b, "location": loc}})
+        print(json.dumps(out))
+    else:
+        for b in state.get("buckets", []):
+            print(b)
     sys.exit(0)
 if cmd3 == ("storage", "buckets", "create"):
     b = args[3].removeprefix("gs://")
@@ -613,6 +629,76 @@ def test_provision_rejects_default_compute_sa(tmp_path: Path) -> None:
     assert "disallowed" in proc.stderr.lower()
 
 
+def test_provision_defaults_gcs_to_bq_location_and_rejects_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("BQ_LOCATION", "us-central1")
+    monkeypatch.delenv("GCS_LOCATION", raising=False)
+    resolved = mh.resolve_bench_config(
+        env_path=tmp_path / "missing.env",
+        repo_root=REPO_ROOT,
+        populate_environ=False,
+    )
+    assert resolved["GCS_LOCATION"] == "us-central1"
+    assert resolved["BIGLAKE_CONNECTION_ID"] == "bench-biglake-us-central1"
+
+    bin_dir, log_file = _write_mock_gcp_bin(tmp_path, scenario={"project_id": "example-proj"})
+    env = dict(os.environ)
+    env.pop("GCS_LOCATION", None)
+    env.update(
+        {
+            "PATH": f"{bin_dir}:{env['PATH']}",
+            "PROJECT_ID": "example-proj",
+            "PROJECT_NUMBER": "99900011122",
+            "BQ_LOCATION": "us-central1",
+            "DATAPROC_REGION": "us-central1",
+            "DATAPROC_ZONE": "us-central1-a",
+        }
+    )
+    subprocess.run(
+        [
+            "bash",
+            str(REPO_ROOT / "scripts" / "provision_infra.sh"),
+            "--clusters=none",
+            "--skip-reservation",
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    calls = log_file.read_text(encoding="utf-8")
+    assert (
+        "storage buckets create gs://lakehouse-bench-99900011122 --project=example-proj --location=us-central1"
+        in calls
+    )
+    assert "--location=US" not in calls
+
+    # Explicit non-US BQ_LOCATION vs mismatched GCS_LOCATION=US must fail fast before GCP calls
+    mismatch_tmp = tmp_path / "mismatch"
+    mismatch_bin, mismatch_log = _write_mock_gcp_bin(mismatch_tmp, scenario={"project_id": "example-proj"})
+    bad_env = dict(env)
+    bad_env.update(
+        {
+            "PATH": f"{mismatch_bin}:{os.environ['PATH']}",
+            "BQ_LOCATION": "asia-southeast1",
+            "GCS_LOCATION": "US",
+        }
+    )
+    bad_proc = subprocess.run(
+        ["bash", str(REPO_ROOT / "scripts" / "provision_infra.sh"), "--clusters=none"],
+        cwd=mismatch_tmp,
+        env=bad_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert bad_proc.returncode != 0
+    assert "co-located GCS_LOCATION" in bad_proc.stderr
+    assert mismatch_log.read_text(encoding="utf-8") == ""
+
+
 def test_teardown_granular_clusters_protects_repo_a_and_purges_bench_and_dataproc_buckets(
     tmp_path: Path,
 ) -> None:
@@ -625,6 +711,7 @@ def test_teardown_granular_clusters_protects_repo_a_and_purges_bench_and_datapro
                 "lakehouse-bench-99900011122",
                 "dataproc-temp-asia-southeast1-1234",
                 "dataproc-staging-asia-southeast1-1234",
+                "dataproc-temp-us-central1-9999",
                 "airport-ops-raw-999",
             ],
             "sas": ["bench-dataproc-runner@example-proj.iam.gserviceaccount.com"],
@@ -693,10 +780,12 @@ def test_teardown_granular_clusters_protects_repo_a_and_purges_bench_and_datapro
     # Preserved reservation
     assert "bq rm --reservation" not in calls
 
-    # Soft-delete patch + deletion on bench & dataproc-temp/staging; airport-ops-* untouched
+    # Soft-delete patch + deletion on bench & matching-region dataproc-temp/staging;
+    # other-region dataproc-temp-* and airport-ops-* remain untouched
     assert "storage rm --recursive --quiet gs://lakehouse-bench-99900011122" in calls
     assert "storage rm --recursive --quiet gs://dataproc-temp-asia-southeast1-1234" in calls
     assert "storage rm --recursive --quiet gs://dataproc-staging-asia-southeast1-1234" in calls
+    assert "dataproc-temp-us-central1-9999" not in calls
     assert "airport-ops-raw-999" not in calls
 
     # Bench SA & VPC deleted; Repo A sandbox-* resources completely untouched

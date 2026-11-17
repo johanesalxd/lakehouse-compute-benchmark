@@ -29,9 +29,10 @@ Options:
   --force-delete-reservation             Allow deleting a reservation even if named sandbox-elt-cap
   --confirm                              Required in non-interactive runs; skips confirmation prompt
   --purge-data                           Also delete the 5 BigQuery datasets, BigLake connection,
-                                         BENCH_BUCKET + dataproc-temp-*/dataproc-staging-* buckets,
-                                         and bench-* SA / firewall / subnet / VPC resources
-                                         (never touches airport-ops-* buckets or sandbox-* resources)
+                                         BENCH_BUCKET + ${DATAPROC_REGION} dataproc-temp-*/dataproc-staging-*
+                                         buckets, and bench-* SA / firewall / subnet / VPC resources
+                                         (never touches airport-ops-* or sandbox-*; do not run while
+                                         Repo A Spark / Spark Connect sessions in ${DATAPROC_REGION} are active)
   -h, --help                             Show this help message
 EOF
 }
@@ -218,7 +219,8 @@ if [[ "${PURGE_DATA}" == "true" ]]; then
   echo "    PURGE DATA:     YES"
   echo "      - Datasets:   ${ALL_DATASETS[*]}"
   echo "      - Connection: ${PROJECT_ID}.${BQ_LOCATION}.${BIGLAKE_CONNECTION_ID}"
-  echo "      - GCS Bucket: gs://${BENCH_BUCKET} (+ dataproc-temp-* / dataproc-staging-* buckets)"
+  echo "      - GCS Bucket: gs://${BENCH_BUCKET} (+ ${DATAPROC_REGION} dataproc-temp-* / dataproc-staging-* buckets)"
+  echo "      - Note:       Do not run --purge-data while Repo A Spark sessions in ${DATAPROC_REGION} are active."
   echo "      - Bench Infra: bench-* SA (${DATAPROC_SA_EMAIL}), bench-allow-internal, bench-pga-*, bench-vpc"
 else
   echo "    PURGE DATA:     NO (datasets, BigLake connection, buckets, SA, and VPC preserved)"
@@ -383,19 +385,43 @@ if [[ "${PURGE_DATA}" == "true" ]]; then
     echo "    GCS bucket 'gs://${BENCH_BUCKET}' not found; skipping."
   fi
 
-  # Discover and delete Dataproc-generated temp/staging buckets (never airport-ops-*)
-  raw_buckets="$(gcloud storage buckets list --project="${PROJECT_ID}" --format="value(name)" 2>/dev/null || true)"
-  if [[ -n "${raw_buckets}" ]]; then
-    while IFS= read -r dp_bucket; do
-      dp_bucket="$(printf '%s' "${dp_bucket}" | tr -d '[:space:]')"
-      [[ -z "${dp_bucket}" || "${dp_bucket}" == "Created" ]] && continue
-      [[ "${dp_bucket}" == "${BENCH_BUCKET}" ]] && continue
-      [[ "${dp_bucket}" == airport-ops-* ]] && continue
-      if [[ "${dp_bucket}" == dataproc-temp-* || "${dp_bucket}" == dataproc-staging-* ]]; then
-        delete_bucket_completely "${dp_bucket}"
-      fi
-    done <<<"$(printf '%s\n' "${raw_buckets}" | grep -v '^Created ' || true)"
-  fi
+  # Discover and delete regional Dataproc-generated temp/staging buckets in DATAPROC_REGION
+  # (never airport-ops-*; do not run --purge-data while Repo A Spark sessions in DATAPROC_REGION are active)
+  raw_buckets_json="$(gcloud storage buckets list --project="${PROJECT_ID}" --format="json(name,location)" 2>/dev/null || true)"
+  mapfile -t REGIONAL_DATAPROC_BUCKETS < <(python3 - "${raw_buckets_json}" "${DATAPROC_REGION}" "${BENCH_BUCKET}" <<'PY'
+import json
+import sys
+
+raw, region, bench_bucket = sys.argv[1:4]
+region_lower = region.strip().lower()
+idx = raw.find("[")
+if idx != -1:
+    try:
+        items = json.loads(raw[idx:])
+    except json.JSONDecodeError:
+        items = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = (item.get("name") or "").strip()
+        loc = (item.get("location") or "").strip().lower()
+        if not name or name == bench_bucket or name.startswith("airport-ops-"):
+            continue
+        if not (name.startswith("dataproc-temp-") or name.startswith("dataproc-staging-")):
+            continue
+        if loc:
+            if loc == region_lower:
+                print(name)
+        elif name.startswith(
+            (f"dataproc-temp-{region_lower}-", f"dataproc-staging-{region_lower}-")
+        ):
+            print(name)
+PY
+)
+  for dp_bucket in "${REGIONAL_DATAPROC_BUCKETS[@]}"; do
+    [[ -z "${dp_bucket}" ]] && continue
+    delete_bucket_completely "${dp_bucket}"
+  done
 
   # Clean up benchmark-owned dedicated SA (bench-* only)
   sa_short="${DATAPROC_SA_EMAIL%%@*}"

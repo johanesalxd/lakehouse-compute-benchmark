@@ -366,6 +366,12 @@ def resolve_bench_config(
         resolved["BENCH_BUCKET"] = f"lakehouse-bench-{resolved['PROJECT_NUMBER']}"
 
     if (
+        not os.environ.get("GCS_LOCATION", "").strip()
+        and not dotenv_values.get("GCS_LOCATION", "").strip()
+    ):
+        resolved["GCS_LOCATION"] = (resolved.get("BQ_LOCATION") or "US").strip()
+
+    if (
         not os.environ.get("BIGLAKE_CONNECTION_ID", "").strip()
         and not dotenv_values.get("BIGLAKE_CONNECTION_ID", "").strip()
     ):
